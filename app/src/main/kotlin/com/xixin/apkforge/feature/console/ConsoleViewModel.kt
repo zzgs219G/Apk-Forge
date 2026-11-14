@@ -423,7 +423,6 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                 mode = snapshot.mode,
                 callsText = snapshot.callsText,
                 payloadDex = snapshot.payloadDex,
-                extraAssets = snapshot.readAssets(),
             )
 
             val r = pipeline.run(input) { s ->
@@ -495,19 +494,6 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             state = state.copy(records = tasks.list())
         }
     }
-
-    /**
-     * 读出当前配置要求的额外资产（宿主包内路径 → 字节）。
-     *
-     * 读不到就**跳过并留日志**，而不是让整次注入失败：
-     * 用户可能只想换个包注入、并不在意弹窗配置，为了一个资产文件把任务打死过于粗暴。
-     */
-    private fun ConsoleUiState.readAssets(): Map<String, ByteArray> =
-        activeConfig?.assets.orEmpty().mapNotNull { (path, local) ->
-            val f = File(local)
-            if (!f.isFile) return@mapNotNull null
-            runCatching { path to f.readBytes() }.getOrNull()
-        }.toMap()
 
     private fun saveStartStep(app: Application, tmp: File) = ApkInjectPipeline.Step(
         stage = ApkInjectPipeline.Stage.SAVE,

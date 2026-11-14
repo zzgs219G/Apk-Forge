@@ -12,7 +12,6 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -42,17 +41,14 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.FolderOpen
-import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.InstallMobile
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.UnfoldLess
 import androidx.compose.material.icons.rounded.UnfoldMore
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -80,7 +76,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.xixin.apkforge.core.apk.ApkInjectPipeline
@@ -92,7 +87,6 @@ import com.xixin.apkforge.ui.anim.InjectArtAnimation
 import com.xixin.apkforge.ui.lifted.AppConstants
 import com.xixin.apkforge.ui.lifted.Gap
 import com.xixin.apkforge.ui.lifted.HGap
-import com.xixin.apkforge.ui.lifted.components.ApkIcon
 import com.xixin.apkforge.ui.lifted.components.rememberCopyText
 
 /**
@@ -342,11 +336,16 @@ private fun RunningBody(state: ConsoleUiState, modifier: Modifier = Modifier) {
 }
 
 /**
- * 单行实时日志。
+ * 实时日志条。
  *
- * 为什么不显示「最新一条」而是显示「当前阶段 + 最新一条」：
- * 重打包阶段每 60 条采样才有一次回调，两次之间屏幕上是静止的。
- * 把阶段名固定在左边，用户至少知道「还在这段里」，不会误判卡死。
+ * 【为什么是「一条」而不是「一列」】用户当时要的就是这个：运行中屏幕上只有
+ * **当前正在做什么**，不是一列要读的条目。历史仍然在，点右侧「展开」就是全量。
+ *
+ * 【为什么它允许换行，而不是 `maxLines = 1 + Ellipsis`】
+ * 一条日志的信息量全在**尾部**（落点方法名、签名、产物路径）。
+ * 截断之后剩下的东西既读不出来，也贴不给 AI —— 那不是「整齐」，是把答案删了。
+ * 所以这里刻意让 label / detail 各自换行：常态下还是一行，超长时往下长一点，
+ * 但一个字都不丢。真要看全部，右侧「展开」给逐条历史 + 一键复制。
  */
 @Composable
 private fun LiveLine(
@@ -362,7 +361,7 @@ private fun LiveLine(
     ) {
         Row(
             Modifier.padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            verticalAlignment = Alignment.Top,
         ) {
             // 小光标：告诉用户这行还在动
             val t = rememberInfiniteTransition(label = "cursor")
@@ -373,6 +372,7 @@ private fun LiveLine(
             )
             Box(
                 Modifier
+                    .padding(top = 4.dp)
                     .size(6.dp)
                     .clip(CircleShape)
                     .background(
@@ -381,35 +381,30 @@ private fun LiveLine(
                     )
             )
             HGap(10.dp)
-            Text(
-                step?.label ?: "准备中",
-                style = MaterialTheme.typography.bodySmall.copy(
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Medium,
-                ),
-                color = if (step?.warn == true) MaterialTheme.colorScheme.error
-                else MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
-            )
-            if (!step?.detail.isNullOrBlank()) {
-                HGap(8.dp)
+            Column(Modifier.weight(1f)) {
                 Text(
-                    step.detail,
-                    style = MaterialTheme.typography.labelSmall.copy(
+                    step?.label ?: "准备中",
+                    style = MaterialTheme.typography.bodySmall.copy(
                         fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Medium,
                     ),
-                    color = MaterialTheme.colorScheme.outline,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
+                    color = if (step?.warn == true) MaterialTheme.colorScheme.error
+                    else MaterialTheme.colorScheme.onSurface,
                 )
+                if (!step?.detail.isNullOrBlank()) {
+                    Text(
+                        step.detail,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace,
+                        ),
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                }
             }
             IconButton(onClick = onToggle, modifier = Modifier.size(32.dp)) {
                 Icon(
                     if (open) Icons.Rounded.UnfoldLess else Icons.Rounded.UnfoldMore,
-                    contentDescription = if (open) "收起日志" else "展开日志",
+                    contentDescription = if (open) "收起日志" else "展开全部 $count 行",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
                 )
@@ -418,12 +413,6 @@ private fun LiveLine(
     }
 }
 
-/**
- * 进度条。
- *
- * 只在 [RunningBody] 里出现——完成后进度条不该继续占版面。
- * 造型刻意不是 Material 细横线：粗 10dp、圆头、进度头带渐隐光带，运行时有流光。
- */
 @Composable
 private fun ForgeProgressBar(progress: Float, failed: Boolean, running: Boolean) {
     val track = MaterialTheme.colorScheme.surfaceContainerHighest

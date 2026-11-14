@@ -122,4 +122,9 @@ dependencies {
     // 单元测试：注入核心（AXML / dex / 重打包）刻意不含 Android API，
     // 因此在本地 JVM（Termux）上就能跑真实 APK 的端到端验证，不必等真机。
     testImplementation("junit:junit:4.13.2")
+    // Android 的 android.jar 在 JVM 单测里只是个壳：org.json 的每个方法都抛
+    // "Method put in org.json.JSONObject not mocked"。表单 ↔ JSON 的往返
+    // （插件包的核心契约）必须能离线验证，所以补一份真的实现。
+    // 测试作用域，不进 APK。
+    testImplementation("org.json:json:20240303")
 }

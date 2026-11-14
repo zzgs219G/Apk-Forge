@@ -1,5 +1,6 @@
 package com.xixin.apkforge.ui.screen.plugin
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,9 +24,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Check
-import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Save
@@ -34,9 +33,9 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenu
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuBox
-import androidx.compose.material3.ExposedDropdownMenu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -52,9 +51,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.xixin.apkforge.data.PluginPack
 import com.xixin.apkforge.feature.plugin.PluginUiState
@@ -63,19 +62,23 @@ import com.xixin.apkforge.ui.lifted.AppConstants
 import com.xixin.apkforge.ui.lifted.Gap
 import com.xixin.apkforge.ui.lifted.HGap
 import com.xixin.apkforge.ui.lifted.SectionTitle
-import com.xixin.apkforge.ui.lifted.components.rememberCopyText
 import com.xixin.apkforge.ui.lifted.components.input.ToolInputField
+import com.xixin.apkforge.ui.lifted.components.rememberCopyText
 
 /**
  * 插件包。
  *
- * 【这个页面在做什么】它不是「配置」，而是「造一份可以带走的载荷」：
- * 改弹窗的标题/正文/按钮 → 实时看到 JSON → 导出 zip（dex + 配置 + 调用行）。
- * 导出时顺带建一条配置，所以用户拿到的不是三个文件，而是「能直接注入的东西」。
+ * 【这个页面在做什么】造一份可以带走的载荷：调弹窗的每一项 → 预览将被烘焙的配置 →
+ * 导出 zip（**只有 dex 与调用行**，配置在 dex 里）→ 顺手建一条配置，回控制台就能注入。
  *
- * 【为什么页面里同时有表单和 JSON】本工程面向的是会去 MT 里翻 assets 的人，
- * 他会想知道「我填的这些到底变成了什么」。把 JSON 明明白白放在下面，
- * 比让他导出后再解压看文件要诚实得多。
+ * 【为什么字段这么多】上一版只做了「标题 + 正文 + 按钮文字」，用户的原话是
+ * 「为什么你不复刻完整人家 3 个按钮」。对照清羽弹窗 7.0，一个弹窗的完整形态至少包含：
+ * 总开关、智能弹出（24h）、静默天数、强制性、点击外部关闭、弹窗风格、背景透明、
+ * 标题与正文（含颜色、HTML）、三个按钮各自的开关/文字/颜色/动作/参数/提示。
+ * 少一项都算是「能力缩水」——用户手里的老配置会有一半字段无处安放。
+ *
+ * 【为什么不再有 json 文件】见 `PluginPack` 顶部注释。这里只留一个**只读预览**，
+ * 让用户确认「我填的东西到底变成了什么」，导出物里不会有这个文件。
  */
 @Composable
 fun PluginScreen(
@@ -104,7 +107,7 @@ fun PluginScreen(
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
-                        "改弹窗内容，导出可直接注入的 dex + 配置",
+                        "调弹窗 → 导出 dex（配置已烘焙进去）",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -125,19 +128,11 @@ fun PluginScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            item { PackCard(state = state) }
-
-            item {
-                FormCard(state = state, vm = vm)
-            }
-
-            item {
-                JsonCard(state = state, onCopy = copyText)
-            }
-
-            item {
-                CallCard(state = state, onCopy = copyText)
-            }
+            item { PackCard(state) }
+            item { ContentCard(state, vm) }
+            item { BehaviorCard(state, vm) }
+            item { ButtonsCard(state, vm) }
+            item { JsonCard(state, copyText) }
         }
 
         Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
@@ -147,9 +142,17 @@ fun PluginScreen(
                     .navigationBarsPadding()
                     .padding(horizontal = AppConstants.SCREEN_EDGE_PADDING, vertical = 10.dp)
             ) {
+                state.blockers.forEach { b ->
+                    Text(
+                        "・$b",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                if (state.blockers.isNotEmpty()) Gap(6.dp)
                 Button(
                     onClick = { vm.export() },
-                    enabled = !state.busy && state.form.valid,
+                    enabled = state.canExport,
                     shape = RoundedCornerShape(16.dp),
                     modifier = Modifier
                         .fillMaxWidth()
@@ -158,23 +161,24 @@ fun PluginScreen(
                     Icon(Icons.Rounded.Save, null, Modifier.size(20.dp))
                     HGap(8.dp)
                     Text(
-                        if (state.busy) "正在导出…" else "导出插件包",
+                        if (state.busy) "正在烘焙…" else "导出插件包",
                         style = MaterialTheme.typography.titleMedium,
                     )
                 }
                 state.exportedZip?.let {
+                    Gap(4.dp)
                     Text(
-                        "已导出到 $it",
+                        "已导出 $it",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
         }
     }
 }
+
+// ══════════════════════ 包里有什么 ══════════════════════
 
 @Composable
 private fun PackCard(state: PluginUiState) {
@@ -185,14 +189,29 @@ private fun PackCard(state: PluginUiState) {
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(16.dp)) {
-            SectionTitle("包里有什么", trailing = if (state.dexSize > 0) "${state.dexSize / 1024} KB dex" else null)
+            SectionTitle(
+                "包里有什么",
+                trailing = when {
+                    state.bakedSize > 0 -> "${state.bakedSize / 1024} KB（烘焙后）"
+                    state.templateSize > 0 -> "${state.templateSize / 1024} KB（模板）"
+                    else -> null
+                },
+            )
             Gap(10.dp)
             PackLine("PayloadDialog.dex", "弹窗载荷，注入后作为 classesN.dex 追加")
-            PackLine("ApkForgeDialog.json", "写进宿主的 assets/，改文案不用重编 dex")
             PackLine("call.txt", "对应的 smali 调用行")
             Gap(10.dp)
             Text(
-                "导出时还会顺手建一条配置，回到控制台就能选它直接注入。",
+                // 这句是给用户的一个明确承诺：包里只多一个文件。上一版往 assets 写 json，
+                // 用户当场就问「你把我包里的 assets 改了？」——这个质疑是对的。
+                "配置已经烘焙进 dex。注入产物里只会多出 classesN.dex 一个条目，" +
+                    "不会碰宿主的 assets，也不会多出任何配置文件。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Gap(8.dp)
+            Text(
+                "代价：改文案要重新导出 dex 再重新注入一次。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -224,8 +243,10 @@ private fun PackLine(name: String, desc: String) {
     }
 }
 
+// ══════════════════════ 文案 ══════════════════════
+
 @Composable
-private fun FormCard(state: PluginUiState, vm: PluginViewModel) {
+private fun ContentCard(state: PluginUiState, vm: PluginViewModel) {
     Card(
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
@@ -233,34 +254,9 @@ private fun FormCard(state: PluginUiState, vm: PluginViewModel) {
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(14.dp)) {
-            SectionTitle("弹窗内容")
+            SectionTitle("文案")
             Gap(10.dp)
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("启用弹窗", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        "关掉后载荷仍会被注入，但不会显示任何东西",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = state.form.enabled, onCheckedChange = vm::setEnabled)
-            }
-            Gap(6.dp)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("点击空白关闭", style = MaterialTheme.typography.bodyMedium)
-                    Text(
-                        "关掉后只能通过按钮关闭，适合强提示",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(checked = state.form.cancelable, onCheckedChange = vm::setCancelable)
-            }
-
-            Gap(12.dp)
             OutlinedTextField(
                 value = state.form.title,
                 onValueChange = vm::setTitle,
@@ -269,60 +265,194 @@ private fun FormCard(state: PluginUiState, vm: PluginViewModel) {
                 shape = RoundedCornerShape(14.dp),
                 modifier = Modifier.fillMaxWidth(),
             )
-            Gap(10.dp)
+            Gap(8.dp)
+            ColorField("标题颜色", state.form.titleColor, vm::setTitleColor)
+
+            Gap(12.dp)
             ToolInputField(
                 value = state.form.message,
                 onValueChange = vm::setMessage,
                 label = "正文",
-                placeholder = "支持 <b>HTML</b> 标签，如 <br> 换行",
+                placeholder = "支持 <b>HTML</b>，<br> 换行；多行会自动分行",
                 maxHeight = 200.dp,
             )
-
-            Gap(16.dp)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "按钮",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f),
-                )
-                if (state.form.buttons.size < 3) {
-                    TextButton(onClick = vm::addButton) {
-                        Icon(Icons.Rounded.Add, null, Modifier.size(16.dp))
-                        HGap(4.dp)
-                        Text("加一个", style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-            }
+            Gap(8.dp)
+            ColorField("正文字色", state.form.messageColor, vm::setMessageColor)
             Gap(6.dp)
-            state.form.buttons.forEachIndexed { i, b ->
-                ButtonEditor(
-                    index = i,
-                    button = b,
-                    canRemove = state.form.buttons.size > 1,
-                    onChange = { vm.setButton(i, it) },
-                    onRemove = { vm.removeButton(i) },
+            Text(
+                "标题和正文至少写一个，否则弹出来是个空白框。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/**
+ * 颜色输入。
+ *
+ * 【为什么不放调色板】手写 `#rrggbb` 对目标用户（会改 smali、用 MT 的人）不是负担，
+ * 而一个取色器要占掉半屏、还要处理 alpha。这里只做一件事：色块预览 + 明文输入。
+ */
+@Composable
+private fun ColorField(label: String, value: String, onChange: (String) -> Unit) {
+    val parsed = remember(value) { parseHex(value) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        val swatch = if (parsed != null) {
+            Modifier.background(Color(parsed), RoundedCornerShape(8.dp))
+        } else {
+            Modifier.background(MaterialTheme.colorScheme.surfaceContainerHighest, RoundedCornerShape(8.dp))
+        }
+        Box(Modifier.size(28.dp).then(swatch))
+        HGap(10.dp)
+        OutlinedTextField(
+            value = value,
+            onValueChange = onChange,
+            label = { Text(label) },
+            singleLine = true,
+            isError = parsed == null && value.isNotBlank(),
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+private fun parseHex(v: String): Long? {
+    val s = v.trim().removePrefix("#")
+    if (s.length != 6) return null
+    return s.toLongOrNull(16)?.let { 0xFF000000L or it }
+}
+
+// ══════════════════════ 行为 ══════════════════════
+
+@Composable
+private fun BehaviorCard(state: PluginUiState, vm: PluginViewModel) {
+    val f = state.form
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        elevation = CardDefaults.cardElevation(0.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            SectionTitle("什么时候弹、长什么样")
+            Gap(10.dp)
+
+            SwitchRow(
+                title = "启用弹窗",
+                desc = "关掉后 dex 仍会被注入，但不会显示任何东西",
+                checked = f.enabled,
+                onChange = vm::setEnabled,
+            )
+            SwitchRow(
+                title = "点击外部关闭",
+                desc = "关掉后只能靠按钮关，适合强提示",
+                checked = f.outsideClose,
+                onChange = vm::setOutsideClose,
+            )
+            SwitchRow(
+                title = "智能弹出（24 小时）",
+                desc = "同一次安装里，弹出后 24 小时内不再弹",
+                checked = f.smart,
+                onChange = vm::setSmart,
+            )
+            SwitchRow(
+                title = "强制性",
+                desc = "返回键与外部点击都关不掉，只能点按钮。风险较高，慎用",
+                checked = f.forced,
+                onChange = vm::setForced,
+            )
+            SwitchRow(
+                title = "背景透明",
+                desc = "弹窗后面的页面不压暗",
+                checked = f.dimBehind,
+                onChange = vm::setDimBehind,
+            )
+
+            Gap(12.dp)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("静默天数", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "安装后前 N 天不弹（0 = 不启用）。从首次运行算起",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                OutlinedTextField(
+                    value = if (f.silentDays > 0) f.silentDays.toString() else "",
+                    onValueChange = { vm.setSilentDays(it.filter(Char::isDigit).toIntOrNull() ?: 0) },
+                    singleLine = true,
+                    placeholder = { Text("关") },
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.size(width = 88.dp, height = 56.dp),
                 )
-                if (i != state.form.buttons.lastIndex) Gap(8.dp)
+            }
+
+            Gap(12.dp)
+            Picker(
+                label = "弹窗风格",
+                current = f.style,
+                options = PluginPack.STYLES.map { it to it },
+                onSelect = vm::setStyle,
+            )
+        }
+    }
+}
+
+@Composable
+private fun SwitchRow(
+    title: String,
+    desc: String,
+    checked: Boolean,
+    onChange: (Boolean) -> Unit,
+) {
+    Row(Modifier.padding(vertical = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                desc,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        HGap(8.dp)
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+// ══════════════════════ 三个按钮 ══════════════════════
+
+@Composable
+private fun ButtonsCard(state: PluginUiState, vm: PluginViewModel) {
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+        elevation = CardDefaults.cardElevation(0.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            SectionTitle("三个按钮", trailing = "左 / 右 / 中")
+            Gap(6.dp)
+            Text(
+                "位置固定：同意在左、拒绝在右、中立居中（AlertDialog 的约定）。" +
+                    "开关关掉的按钮不会出现。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Gap(10.dp)
+            listOf(0, 1, 2).forEach { slot ->
+                val b = state.form.buttons.firstOrNull { it.slot == slot }
+                    ?: PluginPack.Button(slot = slot, on = false, text = "")
+                ButtonEditor(button = b, onChange = { vm.setButton(slot, it) })
+                if (slot != 2) Gap(8.dp)
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ButtonEditor(
-    index: Int,
-    button: PluginPack.DialogButton,
-    canRemove: Boolean,
-    onChange: (PluginPack.DialogButton) -> Unit,
-    onRemove: () -> Unit,
-) {
-    val slotName = when (button.slot) {
-        0 -> "左（确定）"
-        1 -> "右（取消）"
-        else -> "中（中立）"
-    }
+private fun ButtonEditor(button: PluginPack.Button, onChange: (PluginPack.Button) -> Unit) {
     Surface(
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHighest,
@@ -331,44 +461,50 @@ private fun ButtonEditor(
         Column(Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    "$slotName 按钮",
+                    PluginPack.slotLabel(button.slot),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                 )
                 Spacer(Modifier.weight(1f))
-                IconButton(onClick = onRemove, enabled = canRemove, modifier = Modifier.size(28.dp)) {
-                    Icon(
-                        Icons.Rounded.Close,
-                        contentDescription = "删除按钮",
-                        tint = if (canRemove) MaterialTheme.colorScheme.onSurfaceVariant
-                        else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
-                        modifier = Modifier.size(15.dp),
-                    )
-                }
+                Switch(
+                    checked = button.on,
+                    onCheckedChange = { onChange(button.copy(on = it)) },
+                )
             }
-            Gap(4.dp)
+            if (!button.on) {
+                Text(
+                    "不显示这个按钮",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                return@Column
+            }
+
+            Gap(6.dp)
             OutlinedTextField(
                 value = button.text,
                 onValueChange = { onChange(button.copy(text = it)) },
                 label = { Text("文字") },
                 singleLine = true,
+                isError = button.text.isBlank(),
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth(),
             )
             Gap(8.dp)
-            ActionPicker(
-                action = button.action,
+            Picker(
+                label = "点击后",
+                current = button.actionLabel,
+                options = PluginPack.ACTIONS.map { it.second to it.first },
                 onSelect = { onChange(button.copy(action = it)) },
             )
-            if (button.action == "url" || button.action == "custom") {
+            if (button.needsArg) {
                 Gap(8.dp)
                 OutlinedTextField(
                     value = button.arg,
                     onValueChange = { onChange(button.copy(arg = it)) },
-                    label = {
-                        Text(if (button.action == "url") "网址" else "URI（如 myapp://page）")
-                    },
+                    label = { Text(if (button.action == "网址") "网址" else "QQ 号") },
                     singleLine = true,
+                    isError = button.arg.isBlank(),
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -382,46 +518,17 @@ private fun ButtonEditor(
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth(),
             )
+            Gap(8.dp)
+            ColorField("按钮文字色", button.color, { onChange(button.copy(color = it)) })
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun ActionPicker(action: String, onSelect: (String) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    val current = PluginPack.ACTIONS.firstOrNull { it.first == action }?.second ?: "仅关闭"
-    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
-        OutlinedTextField(
-            value = current,
-            onValueChange = {},
-            readOnly = true,
-            singleLine = true,
-            label = { Text("点击后") },
-            shape = RoundedCornerShape(12.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, true),
-            trailingIcon = {
-                Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = null)
-            },
-        )
-        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            PluginPack.ACTIONS.forEach { (id, label) ->
-                DropdownMenuItem(
-                    text = { Text(label) },
-                    onClick = {
-                        onSelect(id)
-                        expanded = false
-                    },
-                )
-            }
-        }
-    }
-}
+// ══════════════════════ 配置预览 ══════════════════════
 
 @Composable
 private fun JsonCard(state: PluginUiState, onCopy: (String) -> Unit) {
+    var expanded by remember { mutableStateOf(false) }
     Card(
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
@@ -430,19 +537,22 @@ private fun JsonCard(state: PluginUiState, onCopy: (String) -> Unit) {
     ) {
         Column(Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                SectionTitle(
-                    PluginPack.CONFIG_NAME,
-                    modifier = Modifier.weight(1f),
-                )
-                IconButton(onClick = { onCopy(state.jsonc) }, modifier = Modifier.size(30.dp)) {
+                SectionTitle("将被烘焙的配置", modifier = Modifier.weight(1f))
+                IconButton(onClick = { onCopy(state.json) }, modifier = Modifier.size(30.dp)) {
                     Icon(
                         Icons.Rounded.ContentCopy,
-                        contentDescription = "复制 JSON",
+                        contentDescription = "复制配置",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(16.dp),
                     )
                 }
             }
+            Gap(6.dp)
+            Text(
+                "这份文本会被写进 dex 的 PayloadConfig.baked()，注入后不再有独立文件。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             Gap(8.dp)
             Surface(
                 shape = RoundedCornerShape(12.dp),
@@ -451,48 +561,62 @@ private fun JsonCard(state: PluginUiState, onCopy: (String) -> Unit) {
             ) {
                 SelectionContainer {
                     Text(
-                        state.jsonc,
+                        // 收起时只给前几行——但**不截断单行**，只是行数少。
+                        // 省略号在这里是错的：用户要复制给 AI 的是完整配置。
+                        if (expanded) state.json else state.json.lineSequence().take(8).joinToString("\n"),
                         style = MaterialTheme.typography.labelSmall.copy(
                             fontFamily = FontFamily.Monospace
                         ),
                         color = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier
-                            .heightIn(max = 260.dp)
-                            .verticalScroll(rememberScrollState())
+                            .let { if (expanded) it.heightIn(max = 320.dp) else it }
+                            .let { if (expanded) it.verticalScroll(rememberScrollState()) else it }
                             .padding(10.dp),
                     )
                 }
+            }
+            TextButton(onClick = { expanded = !expanded }) {
+                Text(
+                    if (expanded) "收起" else "展开全部 ${state.json.lines().size} 行",
+                    style = MaterialTheme.typography.labelMedium,
+                )
             }
         }
     }
 }
 
+// ══════════════════════ 通用下拉 ══════════════════════
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun CallCard(state: PluginUiState, onCopy: (String) -> Unit) {
-    Card(
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-        elevation = CardDefaults.cardElevation(0.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                SectionTitle("调用行", modifier = Modifier.weight(1f))
-                IconButton(onClick = { onCopy(PluginPack.CALL) }, modifier = Modifier.size(30.dp)) {
-                    Icon(
-                        Icons.Rounded.ContentCopy,
-                        contentDescription = "复制调用行",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp),
-                    )
-                }
-            }
-            Gap(6.dp)
-            SelectionContainer {
-                Text(
-                    PluginPack.CALL,
-                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                    color = MaterialTheme.colorScheme.onSurface,
+private fun Picker(
+    label: String,
+    current: String,
+    options: List<Pair<String, String>>,
+    onSelect: (String) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
+        OutlinedTextField(
+            value = current,
+            onValueChange = {},
+            readOnly = true,
+            singleLine = true,
+            label = { Text(label) },
+            shape = RoundedCornerShape(12.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, true),
+            trailingIcon = { Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = null) },
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { (display, value) ->
+                DropdownMenuItem(
+                    text = { Text(display) },
+                    onClick = {
+                        onSelect(value)
+                        expanded = false
+                    },
                 )
             }
         }

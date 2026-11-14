@@ -4,12 +4,10 @@ import android.app.Activity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -40,9 +38,6 @@ import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
-import androidx.compose.material.icons.rounded.Tune
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
@@ -56,7 +51,6 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -96,22 +90,21 @@ import java.util.Locale
 /**
  * 控制台首页。
  *
- * 【这一版动了什么，为什么动】
+ * 【这一版为什么会变成这样】
  *
- * 1. **主按钮从卡片顶部挪到底部固定栏。** 上一版「开始注入」长在锚点卡里，
- *    卡在上面、手机又大，单手拇指够它是别扭的。现在它是一条贴底的常驻栏：
- *    位置永远不变、永远够得着，滚多远都在。
+ * 上一版在同一屏放了两个「开始注入」：贴底的长条按钮栏 + 一个悬浮按钮。
+ * 更要命的是贴底栏没有 `align` —— `Box` 里的子节点默认落在**左上角**，
+ * 于是它在运行时直接叠到了顶栏上。用户看到的是「按钮飞到顶上去了」，
+ * 而他此前说的恰恰是「把上面那个删掉，用右下角代替」。
  *
- * 2. **悬浮按钮不再「选完包才出现」。** 上一版的条件是 `apkFile != null`，
- *    等于在用户最需要「选包」入口的时候把它藏起来。现在它跟底栏是同一动作的替身：
- *    底栏永远在，悬浮按钮只在列表滚过头卡时补位，且内容与底栏一致。
- *
- * 3. **右上角收纳功能。** 之前右上角只有一个状态点，白白浪费。
- *    现在是一个菜单：新建配置 / 批量注入 / 清空记录——都是「跟当前任务无关但常用」的动作，
- *    放这里比塞进侧边栏少一次跳转。
- *
- * 4. **卡片认包靠图标 + 应用名 + 包名 + 文件名。** 上一个版本只有文件名，
- *    而 `app-1.apk` / `app-2.apk` 对用户毫无区别。
+ * 所以改成一句话能说清的结构：
+ *   ① **全屏只有一个主操作** —— 右下角的悬浮按钮。位置固定、拇指够得着、
+ *      任何滚动位置都在。它自己会随状态换文案（选包 → 开始注入 → 看进度），
+ *      用户永远不用在几个入口之间挑。
+ *   ② **卡片只描述、不抢操作**。当前任务卡上没有任何「按钮」形态的主入口，
+ *      空状态也一样，只说「右下角选包」。
+ *   ③ 右上角是**次要动作的收纳处**：批量、换包、清记录。它们与当前任务无关，
+ *      塞进底部会和主操作打架。
  */
 @Composable
 fun ConsoleScreen(
@@ -155,10 +148,6 @@ fun ConsoleScreen(
         }
     }
 
-    val anchorGone by remember {
-        derivedStateOf { listState.firstVisibleItemIndex > 0 }
-    }
-
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             AppTopBar(
@@ -199,17 +188,13 @@ fun ConsoleScreen(
                     start = AppConstants.SCREEN_EDGE_PADDING,
                     end = AppConstants.SCREEN_EDGE_PADDING,
                     top = 4.dp,
-                    // 底部留出固定操作栏 + 悬浮按钮的空间，否则最后一条记录会被压住
-                    bottom = 152.dp,
+                    // 底部留出悬浮按钮的空间，否则最后一条记录会被它压住
+                    bottom = 96.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 item {
-                    AnchorCard(
-                        state = state,
-                        onPickApk = ::pickApk,
-                        onOpenRun = onOpenRun,
-                    )
+                    AnchorCard(state = state, onOpenRun = onOpenRun)
                 }
 
                 if (state.records.isNotEmpty()) {
@@ -278,45 +263,34 @@ fun ConsoleScreen(
             }
         }
 
-        // ── 贴底主操作栏 ──
-        // 位置固定、拇指可达。这是全 App 唯一的主操作，滚到哪都在。
-        BottomActionBar(
-            state = state,
-            onPrimary = ::primary,
-            onOpenSetup = onOpenSetup,
-            onOpenRun = onOpenRun,
-        )
-
-        // 悬浮代替：只有列表滚过头卡、底栏被内容「顶」出视野感时才浮出，
-        // 内容与底栏完全一致（同一个 action），不会让用户学两套。
-        AnimatedVisibility(
-            // 有消息条时不浮出：两者都在底部，同时出现必然互相压住
-            visible = anchorGone && state.message == null,
-            enter = fadeIn() + scaleIn(initialScale = 0.85f),
-            exit = fadeOut() + scaleOut(targetScale = 0.85f),
+        // ── 右下角唯一主操作 ──
+        // 常驻，不随滚动/是否选包而消失。上一版的「选了包才出现」等于在
+        // 用户最需要入口的时候把入口藏了。这里「选 APK」本身就是它的第一个动作。
+        // ⚠️ 必须显式 `align(BottomEnd)`：`Box` 里不给 align 的子节点默认在左上角，
+        //    上一版贴底栏漏了这句，运行时叠到顶栏上——就是「按钮飞到顶上」的来源。
+        ExtendedFloatingActionButton(
+            onClick = ::primary,
+            shape = RoundedCornerShape(20.dp),
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary,
+            icon = {
+                Icon(
+                    when {
+                        state.running -> Icons.AutoMirrored.Rounded.ArrowForward
+                        state.apkFile == null -> Icons.Rounded.FolderOpen
+                        else -> Icons.Rounded.PlayArrow
+                    },
+                    contentDescription = null,
+                )
+            },
+            text = { Text(primaryLabel(state), style = MaterialTheme.typography.labelLarge) },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .navigationBarsPadding()
-                // 底栏实测约 118dp 高（52dp 主按钮 + 次行 + 上下内边距），浮在这里刚好不撞
-                .padding(end = AppConstants.SCREEN_EDGE_PADDING, bottom = 128.dp),
-        ) {
-            ExtendedFloatingActionButton(
-                onClick = ::primary,
-                shape = RoundedCornerShape(20.dp),
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-                icon = {
-                    Icon(
-                        if (state.running) Icons.AutoMirrored.Rounded.ArrowForward
-                        else Icons.Rounded.PlayArrow,
-                        contentDescription = null,
-                    )
-                },
-                text = { Text(primaryLabel(state), style = MaterialTheme.typography.labelLarge) },
-            )
-        }
+                .padding(end = AppConstants.SCREEN_EDGE_PADDING, bottom = 20.dp),
+        )
 
-        // 消息条：浮在底栏之上，不挡主操作
+        // 消息条：浮在悬浮按钮之上，不挡主操作
         AnimatedVisibility(
             visible = state.message != null,
             enter = fadeIn() + expandVertically(),
@@ -324,7 +298,7 @@ fun ConsoleScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
-                .padding(bottom = 128.dp, start = 16.dp, end = 16.dp),
+                .padding(bottom = 88.dp, start = 16.dp, end = 16.dp),
         ) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
@@ -357,79 +331,6 @@ private fun primaryLabel(state: ConsoleUiState): String = when {
     else -> "继续配置"
 }
 
-// ══════════════════════ 贴底主操作 ══════════════════════
-
-/**
- * 贴底主操作栏。
- *
- * 【为什么不用悬浮按钮当主入口】悬浮按钮是「次要动作的补位」语义——
- * 用户在 Material 语汇里看到 FAB，不会预期它是唯一入口。而这里只有一条主路径，
- * 它得有一个稳定的、贴在拇指区的位置。
- */
-@Composable
-private fun BottomActionBar(
-    state: ConsoleUiState,
-    onPrimary: () -> Unit,
-    onOpenSetup: () -> Unit,
-    onOpenRun: () -> Unit,
-) {
-    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(horizontal = AppConstants.SCREEN_EDGE_PADDING, vertical = 10.dp)
-        ) {
-            Button(
-                onClick = onPrimary,
-                shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.buttonColors(),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp),
-            ) {
-                Icon(
-                    when {
-                        state.running -> Icons.AutoMirrored.Rounded.ArrowForward
-                        state.apkFile == null -> Icons.Rounded.FolderOpen
-                        else -> Icons.Rounded.PlayArrow
-                    },
-                    contentDescription = null,
-                    modifier = Modifier.size(20.dp),
-                )
-                HGap(8.dp)
-                Text(primaryLabel(state), style = MaterialTheme.typography.titleMedium)
-            }
-
-            // 次行动作：只在有包时出现，避免空状态下出现两个都点不动的按钮
-            if (state.apkFile != null) {
-                Gap(6.dp)
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    TextButton(onClick = onOpenSetup, modifier = Modifier.weight(1f)) {
-                        Text(
-                            "调整配置",
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                        )
-                    }
-                    if (state.result != null) {
-                        TextButton(onClick = onOpenRun, modifier = Modifier.weight(1f)) {
-                            Text(
-                                if (state.result.ok) "上次成功" else "上次失败",
-                                style = MaterialTheme.typography.labelMedium,
-                                maxLines = 1,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 // ══════════════════════ 锚点卡 ══════════════════════
 
 /**
@@ -444,7 +345,6 @@ private fun BottomActionBar(
 @Composable
 private fun AnchorCard(
     state: ConsoleUiState,
-    onPickApk: () -> Unit,
     onOpenRun: () -> Unit,
 ) {
     val hasApk = state.apkFile != null
@@ -459,7 +359,7 @@ private fun AnchorCard(
     ) {
         Column(Modifier.padding(18.dp)) {
             if (!hasApk) {
-                EmptyAnchor(onPickApk = onPickApk)
+                EmptyAnchor()
                 return@Column
             }
 
@@ -571,7 +471,7 @@ private fun AnchorCard(
 }
 
 @Composable
-private fun EmptyAnchor(onPickApk: () -> Unit) {
+private fun EmptyAnchor() {
     Row(verticalAlignment = Alignment.CenterVertically) {
         ForgeGlyph(
             modifier = Modifier.size(64.dp),
@@ -598,37 +498,12 @@ private fun EmptyAnchor(onPickApk: () -> Unit) {
             )
         }
     }
-    Gap(14.dp)
-    Surface(
-        onClick = onPickApk,
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHighest,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                Icons.Rounded.FolderOpen,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(20.dp),
-            )
-            HGap(10.dp)
-            Text(
-                "从 MT / 文件管理器选 APK",
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier.weight(1f),
-            )
-            Icon(
-                Icons.AutoMirrored.Rounded.ArrowForward,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(18.dp),
-            )
-        }
-    }
+    Gap(12.dp)
+    Text(
+        "点右下角按钮选 APK —— 全屏只有这一个主操作，不用找",
+        style = MaterialTheme.typography.labelMedium,
+        color = MaterialTheme.colorScheme.primary,
+    )
 }
 
 /**

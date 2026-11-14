@@ -9,7 +9,7 @@
 ```
 本地 APK dex 注入工具（Android 端）
 依赖只有 smali-dexlib2 3.0.10 + JUnit
-36 项单元测试基于真实 APK，可离线跑
+42 项单元测试基于真实 APK，可离线跑
 4 种注入模式、批量注入、可自造弹窗载荷（payload/）
 无重签名、不处理加固包、只支持 arm64-v8a
 ```
@@ -27,8 +27,9 @@ com.xixin.apkforge
 │   ├── dex/LifecyclePoints      注入点清单 + native 降级判定（★ 纯逻辑，可单测）
 │   ├── dex/InjectionMode        注入模式 + 落点规划器（★ 纯逻辑，可单测）
 │   ├── dex/DexCallInjector      dexlib2 插指令 / 建方法 / 替换方法体
+│   ├── dex/PayloadBaker         把配置烘焙进载荷 dex（★ 纯 JVM，可单测）
 │   ├── dex/SamplePayload        示例载荷常量（调用行 + asset 路径）
-│   ├── apk/ApkRepackager        zip 重打包（替换 dex、追加 payload 与 assets）
+│   ├── apk/ApkRepackager        zip 重打包（只替换 dex + 追加 payload）
 │   └── apk/ApkInjectPipeline    流水线编排（Stage 权重 + Step 坐标）
 
 ├── data/                        持久化与平台 IO（需要 Context）
@@ -95,11 +96,11 @@ ui → feature → data → core
 
 ```
 app/src/test/kotlin/com/xixin/apkforge/
-├── core/apk/InjectEndToEndTest   8 例  含替代点补 super、替换方法体、额外资产、回调完整性
+├── core/apk/InjectEndToEndTest   9 例  含替代点补 super、替换方法体、产物边界、回调完整性
 ├── core/dex/ClassInspectorTest   4 例
 ├── core/dex/LifecyclePointsTest  11 例 native 降级 / 体系错配 / 进度单调 / 签名可解析
 ├── core/dex/InjectionModeTest    7 例  落点规划：不扩点 / 不重复 / 排除 native / 跨体系不串
-├── core/dex/PluginPayloadTest    4 例  调用行 ↔ 载荷 dex 契约、资产路径、JSONC 去注释
+├── core/dex/PluginPayloadTest   11 例  调用行 ↔ 载荷 dex 契约、占位符唯一、烘焙往返、7.0 兼容
 ├── core/dex/SamplePayloadTest    2 例
 └── support/TestIo                测试专用 IO 封装
 
@@ -182,6 +183,38 @@ payload/dialog/                   弹窗载荷源码（Java，零依赖）
 
 ---
 
+### 1.10 主操作只有一个，且必须显式 `align`
+
+全 App 的**主操作只允许一处**：控制台右下角的悬浮按钮。它在任何状态下都常驻
+（「选了包才出现」等于在用户最需要入口时把入口藏了），不随滚动隐藏。
+
+位置必须写在 `Modifier.align(...)` 上，**不能省**：`Box` 的子节点默认对齐是
+`TopStart`，不写就落在左上角，压住顶栏。它不崩、不报错、布局检查器也看不出异常，
+只有装到手机上才看得见（`踩坑记录.md` 坑 27）。
+
+推论：不要在别处再放一个同义按钮「补位」。两个入口同时存在，用户会认为是没听他说话。
+
+### 1.11 注入产物只许多一个 dex，不许写宿主任何其它条目
+
+`ApkRepackager.repack()` **没有** `extraEntries` 这类参数，`ConfigStore.Config`
+**没有** `assets` 字段。这是刻意的：入口不存在，错就犯不出来。
+
+理由不是洁癖：往宿主包里写配置文件会多出第二条通道（「资产写进去了」+「载荷按路径
+读到了」），任一条没做成都是「注入成功、产物正常、宿主什么都不发生」，**不报错**。
+载荷需要的配置一律烘焙进 dex（`core/dex/PayloadBaker`）。
+
+`InjectEndToEndTest` 钉住：条目数恰好 +1、原有条目一个不少、多出来的只能是
+`classesN.dex`、绝不出现 `.json` / `.jsonc`。
+
+### 1.12 载荷的 min-api 必须用编译期验证，不能靠自觉
+
+弹窗载荷会被塞进任意宿主（包括 minSdk 21 的老包）。`d8 --min-api` **只影响
+desugar 策略**，不会挡住「调用了设备上不存在的 API」——那是运行期
+`NoSuchMethodError`，正好砸在宿主启动那一瞬。
+
+`payload/dialog/build.sh` 用 `platforms/android-21/android.jar` 再编一遍做硬门禁。
+加任何平台 API 前先跑一次脚本，编不过就是不能用。
+
 ## 2. 改动流程
 
 ### 2.1 改核心逻辑
@@ -210,6 +243,11 @@ sh gradlew assembleDebug
 
 # 全部测试（用本工程自己的 debug 产物当靶子）
 sh gradlew :app:testDebugUnitTest
+
+# 重新生成弹窗载荷 dex（改了 payload/dialog/src 之后必须跑）
+# 自带两道门禁：占位符必须恰好出现 1 次、必须能用 android-21 编过
+sh payload/dialog/build.sh
+cp payload/dialog/out/PayloadDialog.dex app/src/main/assets/plugin/
 
 # 指定测试靶子 APK
 sh gradlew :app:testDebugUnitTest -Dapkforge.testApk=/path/to/target.apk
@@ -352,6 +390,7 @@ if (superType == "Landroid/app/Object;") return null
 | 模块职责、设计取舍 | `docs/项目介绍.md` |
 | 修了 bug | `docs/踩坑记录.md`（新增一条，含教训） |
 | 功能增删 | `docs/变更历史.md` |
+| 载荷字段 / 烘焙机制 | `docs/流程文档.md`（Step 7.5）+ `docs/项目介绍.md` §4.6 |
 | 依赖、环境、限制 | `README.md` |
 
 踩坑记录的**教训部分是可复用的资产**，比修法更重要。写的时候问自己：下次遇到什么形态的问题，这条能救命？
@@ -404,5 +443,9 @@ false，导致改写后的方法没被替换进类。改为按「名字 + 签名
 | 抄 `jian_box` 的自定义抽屉手势 | 那是为绕 M3 旧版 bug 写的，本工程 Compose 1.12 已修 |
 | 在白名单里枚举生命周期方法 | 漏项时静默失效 |
 | 在子页面 `viewModel()` 拿共享状态 | owner 是 NavBackStackEntry，三份互不相通的 VM |
+| 往宿主包里写配置文件（assets 等） | 多一条会断的通道，且越界；载荷配置一律烘焙进 dex |
+| 在 `Box` 里省掉 `align` | 默认落左上角，按钮会压到顶栏上，只在真机上看得出来 |
+| 把载荷的配置占位符写成 `static final String` | javac 内联成多份，烘焙时无法定位 → 注入成功但不弹窗 |
+| 用 `String(dex, ISO_8859_1).contains(...)` 检查 dex 里的文本 | 字符串池是 MUTF-8，中文永远匹配不上，成功会被误判成失败 |
 | 把 native 方法不可插当成错误上报 | 用户只知道失败，不知道下一步换哪个点 |
 | 给进度条加「加速/补齐」 | 它就变成装饰品，而用户靠它判断卡住没有 |

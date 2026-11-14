@@ -36,14 +36,6 @@ class ConfigStore(context: Context) {
         val mode: com.xixin.apkforge.core.dex.InjectionMode =
             com.xixin.apkforge.core.dex.InjectionMode.ONCE,
         val dexPath: String? = null,
-        /**
-         * 要随 dex 一起写进宿主的额外资产：宿主包内路径 → 本机文件路径。
-         *
-         * 目前唯一的用途是弹窗载荷的 `assets/apkforge_dialog.json`。
-         * 它是 JSON 而不是代码，所以不能交给「调用行」表达——
-         * 没有这条，载荷会在运行时找不到配置，表现为「注入成功、不弹窗」。
-         */
-        val assets: Map<String, String> = emptyMap(),
         val createdAt: Long = System.currentTimeMillis(),
         val updatedAt: Long = System.currentTimeMillis(),
     ) {
@@ -56,10 +48,6 @@ class ConfigStore(context: Context) {
 
         val dexSizeKb: Long
             get() = dexFile?.takeIf { it.isFile }?.length()?.div(1024) ?: 0
-
-        /** 有几份资产文件还在磁盘上（丢了的要在 UI 上明说） */
-        val assetsReady: Int
-            get() = assets.count { (_, path) -> File(path).isFile }
     }
 
     fun list(): List<Config> {
@@ -83,7 +71,6 @@ class ConfigStore(context: Context) {
         name: String,
         calls: String,
         mode: com.xixin.apkforge.core.dex.InjectionMode,
-        assets: Map<String, String> = emptyMap(),
         dexSource: File?,
         keepExistingDexIfNull: Boolean = true,
     ): Config {
@@ -114,7 +101,6 @@ class ConfigStore(context: Context) {
             name = name.ifBlank { "未命名配置" },
             calls = calls,
             mode = mode,
-            assets = assets.ifEmpty { existing?.assets ?: emptyMap() },
             dexPath = storedDex,
             createdAt = existing?.createdAt ?: System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis(),
@@ -158,9 +144,6 @@ class ConfigStore(context: Context) {
         put("name", c.name)
         put("calls", c.calls)
         put("mode", c.mode.name)
-        put("assets", JSONObject().apply {
-            c.assets.forEach { (k, v) -> put(k, v) }
-        })
         put("dexPath", c.dexPath ?: JSONObject.NULL)
         put("createdAt", c.createdAt)
         put("updatedAt", c.updatedAt)
@@ -173,9 +156,6 @@ class ConfigStore(context: Context) {
         mode = com.xixin.apkforge.core.dex.InjectionMode.entries
             .firstOrNull { it.name == o.optString("mode", "ONCE") }
             ?: com.xixin.apkforge.core.dex.InjectionMode.ONCE,
-        assets = o.optJSONObject("assets")?.let { obj ->
-            buildMap { obj.keys().forEach { k -> obj.optString(k).takeIf { it.isNotBlank() }?.let { put(k, it) } } }
-        } ?: emptyMap(),
         dexPath = if (o.isNull("dexPath")) null
         else o.optString("dexPath").takeIf { it.isNotBlank() },
         createdAt = o.optLong("createdAt", 0L),
