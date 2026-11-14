@@ -39,13 +39,18 @@ object ApkRepackager {
         targetDexName: String,
         newDexBytes: ByteArray,
         payloadDexBytes: ByteArray?,
+        /** 每写一个条目回调一次（index 从 1 开始，total 含目录条目）。用于进度与日志。 */
+        onEntry: ((index: Int, total: Int, name: String) -> Unit)? = null,
     ): Stats {
         val zip = ZipFile(sourceApk)
         var entryCount = 0
         var addedName: String? = null
+        // ZipFile.entries() 是 Enumeration，先物化成 List 才能同时拿到总数与逐个遍历
+        val allEntries = zip.entries().toList()
+        val total = allEntries.size + if (payloadDexBytes != null) 1 else 0
 
         try {
-            val existingNames = zip.entries().toList().map { it.name }.toSet()
+            val existingNames = allEntries.map { it.name }.toSet()
             // 找下一个空闲的 classesN.dex 名字
             if (payloadDexBytes != null) {
                 var n = 2
@@ -57,11 +62,12 @@ object ApkRepackager {
             outputApk.parentFile?.mkdirs()
             ZipOutputStream(outputApk.outputStream().buffered()).use { out ->
                 // 1) 原样拷贝所有条目，途中替换目标 dex
-                for (entry in zip.entries()) {
+                for (entry in allEntries) {
                     if (entry.isDirectory) {
                         out.putNextEntry(ZipEntry(entry.name).apply { time = entry.time })
                         out.closeEntry()
                         entryCount++
+                        onEntry?.invoke(entryCount, total, entry.name)
                         continue
                     }
 
@@ -73,6 +79,7 @@ object ApkRepackager {
 
                     writeEntry(out, entry, bytes)
                     entryCount++
+                    onEntry?.invoke(entryCount, total, entry.name)
                 }
 
                 // 2) 追加 payload dex
@@ -83,6 +90,7 @@ object ApkRepackager {
                     }
                     writeEntry(out, e, payloadDexBytes)
                     entryCount++
+                    onEntry?.invoke(entryCount, total, addedName)
                 }
             }
         } finally {

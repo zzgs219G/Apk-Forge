@@ -9,7 +9,7 @@
 ```
 本地 APK dex 注入工具（Android 端）
 依赖只有 smali-dexlib2 3.0.10 + JUnit
-10 项单元测试基于真实 APK，可离线跑
+23 项单元测试基于真实 APK，可离线跑
 无重签名、不处理加固包、只支持 arm64-v8a
 ```
 
@@ -18,39 +18,43 @@
 ```
 com.xixin.apkforge
 ├── MainActivity.kt              只挂 AppRoot
-│
+
 ├── core/                        ★ 纯 JVM，禁止依赖 Android API
 │   ├── axml/AxmlManifest        二进制 AXML 解析
 │   ├── dex/SmaliCallParser      smali invoke 行 → 结构化
 │   ├── dex/ClassInspector       探测类方法/父类
+│   ├── dex/LifecyclePoints      注入点清单 + native 降级判定（★ 纯逻辑，可单测）
 │   ├── dex/DexCallInjector      dexlib2 插指令 / 建方法
 │   ├── dex/SamplePayload        示例载荷常量（调用行 + asset 路径）
-│   ├── apk/ApkRepackager        zip 重打包
-│   └── apk/ApkInjectPipeline    流水线编排
-│
+│   ├── apk/ApkRepackager        zip 重打包（onEntry 回调供进度用）
+│   └── apk/ApkInjectPipeline    流水线编排（Stage 权重 + Step 坐标）
+
 ├── data/                        持久化与平台 IO（需要 Context）
-│   ├── ConfigStore              JSON 配置存储
+│   ├── ConfigStore              JSON 配置存储（调用行 + payload dex）
+│   ├── TaskStore                JSON 任务记录 + APK 私有副本
 │   ├── OutputStore              MediaStore 写 Download
 │   └── FilePicker               MT 优先的文件选择
-│
-├── feature/                     ViewModel，一功能一目录
-│   ├── inject/InjectViewModel
-│   └── config/ConfigViewModel
-│
+
+├── feature/
+│   ├── console/ConsoleViewModel  控制台唯一 VM：选包 → 配置 → 执行 → 记录
+│   └── config/ConfigViewModel    配置页增删改查（与执行流程解耦）
+
 └── ui/
-    ├── AppRoot                  侧边栏 + NavHost
-    ├── design/                  ★ 设计系统，唯一视觉来源
-    │   ├── ForgeTheme           色板 / 字阶 / 形状
-    │   ├── Motion               弹簧 / 缓动 / 时长 / 尺寸 token
-    │   ├── PressBounce          按压缩放修饰符
-    │   ├── ForgeComponents      顶栏 / 按钮 / 徽标 / 卡片 / 读数 …
-    │   ├── ForgeInputs          单行 / 多行输入
-    │   └── ForgeSelectors       弹出面板 / chip / 文件行
-    ├── anim/                    注入动画（2 版并存）+ SVG path 解析
-    ├── screen/inject/           注入页
-    ├── screen/config/           配置页
-    ├── screen/about/            关于页
-    └── theme/Theme.kt           只做 Forge → MaterialTheme 的映射
+    ├── AppRoot                  侧边栏 + NavHost（★ 在此持有共享 VM）
+    ├── design/Palette.kt        色阶 / 字阶 / 形状 / 间距（唯一视觉来源）
+    ├── lifted/                  搬运自 jian_box 的组件库
+    │   ├── page/                顶栏 / 流体抽屉
+    │   ├── components/          按钮 / 输入 / 选择 / 结果卡 / 徽标
+    │   ├── color/               M3 色槽映射
+    │   └── m3e/                 M3E 语义动画 + 波浪进度
+    ├── anim/                    六边形注入动画 + SVG path 解析
+    ├── screen/console/          控制台（锚点卡 + 任务记录 + 悬浮锚点）
+    ├── screen/setup/            注入配置（配置 / 类名 / 方法 / 载荷）
+    ├── screen/run/              运行（进度条 + 日志终端 + 完成动画 + 结果）
+    ├── screen/config/           配置管理
+    ├── screen/about/            关于
+    ├── screen/ComingSoonScreen  未实现入口的占位（如签名）
+    └── theme/Theme.kt           只做 Palette → MaterialTheme 的映射
 ```
 
 ### 依赖方向（单向，禁止反向）
@@ -66,6 +70,7 @@ ui → feature → data → core
 - `data/` 反向依赖 `feature/` 或 `ui/`
 - `feature/` 里出现 Composable
 - 页面直接 new 一个 `ConfigStore`（必须走 ViewModel）
+- 在子页面里写 `viewModel()` 拿共享状态（owner 是 NavBackStackEntry，会各拿一份）
 
 ### 分层职责
 
@@ -74,17 +79,18 @@ ui → feature → data → core
 | `core/` | Kotlin 标准库、dexlib2、`java.util.zip` | `android.*`、Context、Log |
 | `data/` | `core/`、Android IO/存储 API | 反向依赖上层、写 UI 逻辑 |
 | `feature/` | `core/` `data/`、`ViewModel`、协程 | Composable、直接持有 Activity |
-| `ui/design/` | Compose 基础、`Forge` 自身 | 业务类型（不得 import `core/feature`） |
-| `ui/screen/` | 全部下层 + `ui/design` `ui/anim` | 手写色值/字号/弹簧字面量 |
+| `ui/design/` | Compose 基础、色板自身 | 业务类型（不得 import `core/feature`） |
+| `ui/screen/` | 全部下层 + `ui/design` `ui/anim` `ui/lifted` | 手写色值/字号/弹簧字面量 |
 
 ### 测试目录镜像主代码
 
 ```
 app/src/test/kotlin/com/xixin/apkforge/
-├── core/apk/InjectEndToEndTest
-├── core/dex/ClassInspectorTest
-├── core/dex/SamplePayloadTest
-└── support/TestIo              测试专用 IO 封装
+├── core/apk/InjectEndToEndTest   6 例  含替代点补 super、重打包回调完整性
+├── core/dex/ClassInspectorTest   4 例
+├── core/dex/LifecyclePointsTest  11 例 native 降级 / 体系错配 / 进度单调 / 签名可解析
+├── core/dex/SamplePayloadTest    2 例
+└── support/TestIo                测试专用 IO 封装
 ```
 
 
@@ -118,7 +124,23 @@ app/src/test/kotlin/com/xixin/apkforge/
 - 是否引用 Android 缺失的 API（`java.util.stream` **完全不存在**；`java.nio.file` 被裁剪）
 - 是否引入注解处理器（KSP/kapt 会显著拖慢手机端构建）
 
-### 1.5 产物路径必须用户可见
+### 1.5 共享 ViewModel 的 owner 必须高于共享页面
+
+`viewModel()` 默认以当前 `NavBackStackEntry` 为 owner。控制台、注入配置、运行是**一个任务的三个阶段**，
+在各自页面里 `viewModel()` 会拿到三份互不相通的状态（踩坑记录 坑 19）。
+
+规则：共享 VM 在 `AppRoot`（NavHost 之上）取一次，按**必填参数**往下传。
+子页面的 `vm` 参数不允许给默认值 —— 默认值本身就是这个 bug 的入口。
+
+### 1.6 导航：平级切换与下钻分开
+
+- 侧边栏平级入口 → `navigate { popUpTo(栈底) { saveState }; launchSingleTop; restoreState }`
+- 控制台 → 子页 → 纯 `navigate`，返回用显式目标 `popBackStack(栈底, inclusive = false)`
+- 子页里跳平级页 → 先 `popBackStack(栈底)` 再 `go(dest)`
+
+两套机制混用不会崩溃，只会「多点几下才回不去」（坑 20），靠点测试覆盖不全。
+
+### 1.7 产物路径必须用户可见
 
 禁止写 `getExternalFilesDir`（Android 11+ 文件管理器看不到）。一律走 `OutputStore` → `Download/ApkForge/`。
 
@@ -255,7 +277,18 @@ v_i = i（须 < registerCount）
 
 注入点在方法**第一条指令之前**，此时 v 族尚未赋值。用户写了 v 寄存器只给 warning，不阻止（有人可能故意这么干），但必须报出来。
 
-### 5.4 新建方法必须补父类调用
+### 5.4 native 方法不可插，要降级而不是报错
+
+`onCreate` 是 native（加固壳 / `NativeActivity`）时，`DexCallInjector` 只能返回 `Skipped`。
+「Skipped」不该是终点，而应触发重规划：`LifecyclePoints.resolve()` 按
+`CREATE_FALLBACKS`（onPostCreate → onStart → onResume → attachBaseContext）换点。
+
+三条约束（`LifecyclePointsTest` 钉住）：
+1. 只有 `Status.NATIVE` 才降级，`MISSING` 不降级（没有就新建）；
+2. 替代点必须来自**同一个类**的可用清单（`Application` 不能推荐 `onPostCreate`）；
+3. 降级原因必须回传到 UI —— 悄悄换掉方法比报错更危险。
+
+### 5.5 新建方法必须补父类调用
 
 生命周期方法是**覆写**语义，覆写的默认契约就是调 super。判定依据：
 
@@ -267,7 +300,7 @@ if (superType == "Landroid/app/Object;") return null
 
 **不许用方法名白名单**（坑 5）——白名单漏项时不报错，只是行为不对。
 
-### 5.5 缺返回值的兜底
+### 5.6 缺返回值的兜底
 
 新建方法非 void 返回时要给 `RETURN` / `RETURN_WIDE` / `RETURN_OBJECT`，否则验证器拒绝。
 
@@ -334,3 +367,6 @@ false，导致改写后的方法没被替换进类。改为按「名字 + 签名
 | 用伪造 smali 样本代替真实 APK 测试 | 覆盖不到多 dex / Compose 大方法 / R8 折叠等真实形态 |
 | 抄 `jian_box` 的自定义抽屉手势 | 那是为绕 M3 旧版 bug 写的，本工程 Compose 1.12 已修 |
 | 在白名单里枚举生命周期方法 | 漏项时静默失效 |
+| 在子页面 `viewModel()` 拿共享状态 | owner 是 NavBackStackEntry，三份互不相通的 VM |
+| 把 native 方法不可插当成错误上报 | 用户只知道失败，不知道下一步换哪个点 |
+| 给进度条加「加速/补齐」 | 它就变成装饰品，而用户靠它判断卡住没有 |

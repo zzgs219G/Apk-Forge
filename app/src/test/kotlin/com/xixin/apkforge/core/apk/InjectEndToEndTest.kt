@@ -233,6 +233,97 @@ class InjectEndToEndTest {
     }
 
     @Test
+    fun `注入到生命周期替代点也补父类 super 调用`() {
+        // 场景：目标 Activity 的 onCreate 是 native（加固壳常见），App 会降级到 onPostCreate。
+        // 这里直接以 onPostCreate 为注入点跑一遍真实包，钉住两件事：
+        //   ① 替代点不存在时能新建；
+        //   ② 新建的替代点照样补 super —— 少这一条，Activity 状态机就断在这里。
+        val apk = locateApk()
+        val t = pickActivity(apk)
+        assumeTrue(t != null)
+        val (dexName, ownerType, _) = t!!
+
+        val src = TestIo.copy(
+            apk,
+            File(
+                File(System.getProperty("java.io.tmpdir"), "apkforge-e2e-alt").apply { mkdirs() },
+                "src.apk"
+            )
+        )
+        val line = SamplePayload.CALL
+        val (calls, errs) = SmaliCallParser.parseAll(line)
+        assertTrue("解析失败: ${errs.messages}", errs.isEmpty)
+
+        val alt = com.xixin.apkforge.core.dex.LifecyclePoints.ACTIVITY
+            .first { it.name == "onPostCreate" }
+        val outcome = DexCallInjector.inject(
+            TestIo.readEntry(src, dexName)!!,
+            DexCallInjector.Spec(ownerType, alt.name, alt.signature, calls),
+        )
+        assertTrue("应成功，实际 $outcome", outcome is DexCallInjector.Outcome.Injected)
+        val inj = outcome as DexCallInjector.Outcome.Injected
+
+        val df = loadDex(inj.dex)!!
+        val cls = df.classes.first { it.type == ownerType }
+        val m = cls.methods.first {
+            it.name == alt.name &&
+                it.parameterTypes.map { p -> p.toString() } == listOf("Landroid/os/Bundle;")
+        }
+        val insns = m.implementation!!.instructions.toList()
+        assertTrue("替代点方法不能是空的", insns.isNotEmpty())
+
+        val first = insns.first()
+        val isSuper = first.opcode == Opcode.INVOKE_SUPER_RANGE || first.opcode == Opcode.INVOKE_SUPER
+        assertTrue("新建的替代点首条指令应是父类调用，实际 ${first.opcode}", isSuper)
+        val ref = when (first) {
+            is Instruction3rc -> first.reference as MethodReference
+            is Instruction35c -> first.reference as MethodReference
+            else -> null
+        }
+        assertEquals("父类调用要指向同名方法", alt.name, ref?.name)
+        assertEquals("父类调用要指向父类", cls.superclass, ref?.definingClass)
+        println("ALT: ${alt.name} 指令 = ${insns.map { it.opcode }}")
+    }
+
+    @Test
+    fun `重打包逐条目回调完整且不重复`() {
+        // 运行页日志里「写入 xxx 条目」那几百行就是从这来的。
+        // 契约：index 从 1 递增到 total，每个条目恰好一次 —— 少报会让进度条停在半路，
+        // 重复报会让日志刷出重叠的数字。
+        val apk = locateApk()
+        val t = pickActivity(apk)
+        assumeTrue(t != null)
+        val (dexName, ownerType, _) = t!!
+
+        val work = File(System.getProperty("java.io.tmpdir"), "apkforge-e2e-progress")
+            .apply { mkdirs() }
+        val src = TestIo.copy(apk, File(work, "src.apk"))
+        val out = File(work, "out.apk").apply { delete() }
+
+        val calls = SmaliCallParser.parseAll(SamplePayload.CALL).first
+        val inj = DexCallInjector.inject(
+            TestIo.readEntry(src, dexName)!!,
+            DexCallInjector.Spec(ownerType, "onCreate", "(Landroid/os/Bundle;)V", calls),
+        ) as DexCallInjector.Outcome.Injected
+
+        val reported = mutableListOf<Int>()
+        val stats = ApkRepackager.repack(
+            sourceApk = src,
+            outputApk = out,
+            targetDexName = dexName,
+            newDexBytes = inj.dex,
+            payloadDexBytes = sampleDex.readBytes(),
+            onEntry = { index, _, _ -> reported += index },
+        )
+
+        assertTrue("应有回调", reported.isNotEmpty())
+        assertEquals("index 必须从 1 连续递增到 total",
+            (1..stats.totalEntries).toList(), reported)
+        assertEquals("total 应等于条目数", stats.totalEntries, reported.size)
+        println("REPACK: 回调 ${reported.size} 次 / 条目 ${stats.totalEntries}")
+    }
+
+    @Test
     fun `解析器能处理各种 invoke 形态`() {
         val cases = listOf(
             "invoke-static {p0}, La/b/C;->d(Landroid/app/Activity;)V",

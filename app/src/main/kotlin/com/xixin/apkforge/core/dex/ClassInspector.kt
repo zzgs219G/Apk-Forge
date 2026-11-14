@@ -5,56 +5,6 @@ import com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile
 import java.io.File
 import com.xixin.apkforge.core.apk.ApkRepackager
 
-/**
- * 生命周期注入点清单 + 目标类已有方法的探测。
- *
- * 【为什么要有这个】让用户手输 `onCreate` / `(Landroid/os/Bundle;)V` 是不合理的：
- * 生命周期方法名和签名是固定枚举，用户记不住也没必要记。
- * 下拉框列出来，并且标出「类里已有」还是「将新建」，用户一眼就知道后果。
- */
-object LifecyclePoints {
-
-    data class Point(
-        val name: String,
-        val signature: String,
-        /** 面向用户的说明 */
-        val hint: String,
-    ) {
-        val label: String get() = name
-        val detail: String get() = "$name$signature"
-    }
-
-    /** Activity 常见注入点，按「跑得早」排序——注入越早，抢在业务逻辑前生效的机会越大。 */
-    val ACTIVITY: List<Point> = listOf(
-        Point("attachBaseContext", "(Landroid/content/Context;)V", "最早，Context 刚挂上"),
-        Point("onCreate", "(Landroid/os/Bundle;)V", "最常用，界面创建"),
-        Point("onStart", "()V", "界面即将可见"),
-        Point("onResume", "()V", "可交互"),
-        Point("onPostCreate", "(Landroid/os/Bundle;)V", "创建完成"),
-        Point("onNewIntent", "(Landroid/content/Intent;)V", "复用实例"),
-        Point("onPause", "()V", "失焦"),
-        Point("onStop", "()V", "不可见"),
-        Point("onDestroy", "()V", "销毁"),
-    )
-
-    /** Application 注入点。 */
-    val APPLICATION: List<Point> = listOf(
-        Point("attachBaseContext", "(Landroid/content/Context;)V", "最早，Application 刚挂上"),
-        Point("onCreate", "()V", "App 进程启动"),
-    )
-
-    /**
-     * 按父类判断是 Activity 还是 Application 系列，给出合适的清单。
-     * 判断不出来就合并给全套，让用户自己挑。
-     */
-    fun forSuperClass(superType: String?): List<Point> = when {
-        superType == null -> ACTIVITY
-        superType == "Landroid/app/Application;" -> APPLICATION
-        superType.contains("Application") -> APPLICATION
-        else -> ACTIVITY
-    }
-}
-
 /** 目标类里已有的方法（名字 + 签名）。 */
 data class ExistingMethod(
     val name: String,

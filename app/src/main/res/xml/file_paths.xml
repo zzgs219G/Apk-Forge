@@ -3,4 +3,10 @@
     <!-- 注入产物放在 getExternalFilesDir(null)/output 下，导出时通过 FileProvider 分享 -->
     <external-files-path name="output" path="output/" />
     <cache-path name="cache" path="." />
+    <!--
+      历史产物：任务记录里存的是 Download/ApkForge/xxx.apk 的真实路径，
+      重装/分享/MT 定位都靠 FileProvider 转 URI。少了这条，
+      重启 App 后打开旧记录会直接抛 IllegalArgumentException。
+    -->
+    <external-path name="downloads" path="Download/ApkForge/" />
 </paths>
