@@ -53,7 +53,7 @@
 1. 装 `app-debug.apk`
 2. 控制台 → **选 APK 开始**（自动读出应用名 / 图标 / 包名 / LAUNCHER Activity）
 3. 选一套配置；没有就点「新建」，或先点「先填一套示例跑通流程」
-4. 确认注入点（默认「自动」，需要接管时点「指定」）→ 底部 **开始注入**
+4. 确认注入点（默认「自动」，需要接管时点「指定」）→ 右下角悬浮按钮 **开始注入**
 5. 跑完看结果卡：改了什么、产物在哪、安装 / MT 定位 / 分享
 
 任务会留一条记录在控制台：下次想换套配置再注入，点记录就行，不用重新找包。
@@ -61,19 +61,30 @@
 **批量注入**：右上角菜单 → 批量注入 → 选一个目录（含子目录，最多 50 个）→ 挑一套配置 → 开始。
 串行跑，每项带自己的状态与失败原因。
 
-**插件包**：侧边栏 → 插件包 → 改标题/正文/按钮 → 导出。
-产出 `Download/ApkForge/apkforge-plugin.zip`（dex + 配置 + 调用行），并顺手建一条配置。
+**插件包**：侧边栏 → 插件包 → 调弹窗（标题/正文/三个按钮/风格/智能弹出/静默期/强制性）→ 导出。
+产出 `Download/ApkForge/apkforge-plugin.zip`（**dex + 调用行**，配置已烘焙进 dex），并顺手建一条配置。
+
+> 产物里只会多出 `classesN.dex` 一个条目。不会往宿主的 `assets/` 写任何文件——
+> 注入一个包只该让它多一个 dex，别的不该动。
 
 ### 自己构建弹窗载荷
 
 ```bash
-export ANDROID_HOME=/path/to/android-sdk      # 需要 build-tools（d8）与任一 platform
+export ANDROID_HOME=/path/to/android-sdk      # 需要 build-tools（d8）与 platforms;android-37.0
 sh payload/dialog/build.sh
-# 产出 payload/dialog/out/{PayloadDialog.dex, ApkForgeDialog.json, call.txt, apkforge-plugin.zip}
+# 产出 payload/dialog/out/{PayloadDialog.dex, call.txt, apkforge-plugin.zip}
 ```
 
-载荷只依赖 `android.app.AlertDialog` / `org.json`，**没有网络代码**；
-配置读宿主自己的 `assets/apkforge_dialog.json`，改文案不用重编 dex。
+载荷只依赖 `android.app.AlertDialog` / `org.json`，**没有网络代码**。
+配置**烘焙在 dex 里**（占位符 `__APKFORGE_CONFIG__` 由 `PayloadBaker` 替换），
+所以改文案要重新导出 dex 再重新注入——换来的是产物里不多一个文件。
+
+脚本自带两道门禁：
+
+- 占位符在整份 dex 里必须恰好出现 1 次（写成 `static final` 会被内联成多份，
+  烘焙时无法定位 → 运行时静默不弹窗）；
+- 用 `platforms/android-21/android.jar` 再编一遍。`d8 --min-api` 不挡
+  「调用了设备上不存在的 API」，那要到运行期才 `NoSuchMethodError`。
 
 ---
 

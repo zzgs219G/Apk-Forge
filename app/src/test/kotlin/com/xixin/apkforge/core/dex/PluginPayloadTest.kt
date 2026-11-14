@@ -5,6 +5,7 @@ import com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile
 import com.xixin.apkforge.data.PluginPack
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -14,11 +15,12 @@ import java.io.File
  * 插件包载荷的**契约**验证。
  *
  * 防的是本工程最难查的一类失败：注入「成功」、产物正常、运行期什么都不发生。
- * 弹窗载荷要求三件事严格对齐，任何一处错位都是静默失效：
+ * 弹窗载荷要求几件事严格对齐，任何一处错位都是静默失效：
  *   1. 调用行里的类名/方法名/签名，必须与 dex 里真实存在的那个方法逐字一致；
- *   2. 那个方法必须是 `static`——不是 static 的话 `invoke-static` 会在运行时
- *      抛 IncompatibleClassChangeError，而注入阶段看不出来；
- *   3. 配置里的 assets 路径必须与载荷读取的常量一致。
+ *   2. 那个方法必须是 `static`——不是的话 `invoke-static` 运行时抛
+ *      IncompatibleClassChangeError，注入阶段看不出来；
+ *   3. 配置占位符必须在整份 dex 里**只出现一次**，否则烘焙无从下手；
+ *   4. 烘焙之后占位符必须消失、配置必须真的能读回来。
  *
  * 这些都不需要真机，也不需要 Android 运行时，所以钉在 JVM 测试里。
  */
@@ -86,14 +88,110 @@ class PluginPayloadTest {
     }
 
     @Test
-    fun `宿主资产路径与载荷读取的常量一致`() {
-        // 两处字符串分居 data 与 payload 两个模块，靠人记住一定会漂
-        assertEquals("assets/" + PluginPack.PAYLOAD_ASSET_NAME, PluginPack.HOST_ASSET_PATH)
+    fun `配置占位符在整份 dex 里只出现一次`() {
+        assumeTrue(dex.isFile)
+        // 防的是「把占位符写成 static final String」这种改法：javac 会把它内联到
+        // 每个使用点，dex 里就有多份拷贝，PayloadBaker 无法确定该替换哪一份，
+        // 替换一处而别处仍是占位符 —— 表现是「注入成功、不弹窗」，没有任何报错。
+        val bytes = dex.readBytes()
+        val count = countOccurrences(bytes, PayloadBaker.PLACEHOLDER.toByteArray())
         assertEquals(
-            "宿主资产文件名必须与载荷里的 ASSET_NAME 一致（大小写敏感，Android 上是区分大小写的）",
-            "apkforge_dialog.json",
-            PluginPack.PAYLOAD_ASSET_NAME,
+            "占位符出现 $count 次（必须恰好 1 次）。检查 PayloadConfig.baked() 是否退化成了常量",
+            1, count,
         )
+        assertTrue("模板 dex 不该已经是烘焙状态", !PayloadBaker.isBaked(bytes))
+    }
+
+    @Test
+    fun `烘焙后占位符消失且配置能原样读回`() {
+        assumeTrue(dex.isFile)
+        val json = PluginPack.toJson(PluginPack.DialogForm())
+        when (val r = PayloadBaker.bake(dex.readBytes(), json)) {
+            is PayloadBaker.Outcome.Failed -> throw AssertionError("烘焙失败：${r.reason}")
+            is PayloadBaker.Outcome.Ok -> {
+                assertTrue("烘焙后魔数必须仍是 dex", PluginPack.isDex(r.dex))
+                assertTrue(
+                    "烘焙后占位符必须消失，否则运行期拿到的还是占位符",
+                    !String(r.dex, Charsets.ISO_8859_1).contains(PayloadBaker.PLACEHOLDER),
+                )
+                assertTrue("烘焙后的 dex 应被判为已烘焙", PayloadBaker.isBaked(r.dex))
+
+                val back = PayloadBaker.extract(r.dex)
+                assertNotNull("读不回配置：导入插件包时表单会全空", back)
+                assertEquals("配置必须逐字往返", json, back)
+
+                // 往返到表单再比：字段少一个的表现是「用户改了没生效」
+                val form = PluginPack.fromJson(back!!)
+                assertEquals("标题没往返回来", PluginPack.DialogForm().title, form.title)
+                assertEquals("三个按钮的槽位数量变了", 3, form.buttons.size)
+                assertEquals("按钮动作没往返回来", "网址", form.buttons.first { it.slot == 1 }.action)
+            }
+        }
+    }
+
+    @Test
+    fun `三个按钮都能往返且关掉的按钮不会丢`() {
+        // 用户的原话是「为什么你不复刻完整人家 3 个按钮」。
+        // 这条钉住：左/右/中三个槽位各自独立，中间那个即使关着也必须往返回来，
+        // 否则用户一开一关就发现「中间那个按钮不见了」。
+        val form = PluginPack.DialogForm().let { f ->
+            f.copy(
+                buttons = listOf(
+                    PluginPack.Button(slot = 0, on = true, text = "确认", action = "无"),
+                    PluginPack.Button(
+                        slot = 1, on = true, text = "跳转", action = "网址",
+                        arg = "https://example.com", toast = "正在打开",
+                    ),
+                    PluginPack.Button(
+                        slot = 2, on = false, text = "加群", action = "QQ群", arg = "123456",
+                    ),
+                )
+            )
+        }
+        val back = PluginPack.fromJson(PluginPack.toJson(form))
+        assertEquals("三个槽位都要在", listOf(0, 1, 2), back.buttons.map { it.slot }.sorted())
+        assertTrue("中间按钮的关状态丢了", !back.buttons.first { it.slot == 2 }.on)
+        assertEquals("QQ 号丢了", "123456", back.buttons.first { it.slot == 2 }.arg)
+        assertEquals("网址丢了", "https://example.com", back.buttons.first { it.slot == 1 }.arg)
+    }
+
+    @Test
+    fun `老版本 7_0 配置能直接粘进来`() {
+        // 字段名与清羽弹窗 7.0 一致，是为了让用户手上的老配置不白写。
+        // 这里用 7.0 的写法（默认白 / 打开网页 / 同意按钮事件）验证归一化。
+        val legacy = """
+            {
+              "总开关": "开",
+              "智能弹出": "开",
+              "静默天数": "3",
+              "弹窗风格": "默认白",
+              "标题": "清羽网络弹窗V7",
+              "信息": ["第一行", "第二行"],
+              "同意按钮": "开",
+              "同意按钮文本": "确认",
+              "同意按钮事件": { "动作": "打开网页", "网址": "https://a.b/c", "提示": "跳转中" },
+              "拒绝按钮": "开",
+              "拒绝按钮文本": "QQ群",
+              "拒绝按钮事件": { "动作": "QQ群", "QQ号": "962230699" },
+              "中立按钮": "关"
+            }
+        """.trimIndent()
+        val f = PluginPack.fromJson(legacy)
+        assertEquals("默认白应归一化成默认亮", "默认亮", f.style)
+        assertEquals("智能弹出没读到", true, f.smart)
+        assertEquals("静默天数没读到", 3, f.silentDays)
+        assertEquals("数组形式的信息应拼成多行", "第一行\n第二行", f.message)
+        assertEquals("打开网页应归一化成网址", "网址", f.buttons.first { it.slot == 0 }.action)
+        assertEquals("网址丢了", "https://a.b/c", f.buttons.first { it.slot == 0 }.arg)
+        assertEquals("QQ 号丢了", "962230699", f.buttons.first { it.slot == 1 }.arg)
+        assertTrue("中立按钮应是关", !f.buttons.first { it.slot == 2 }.on)
+    }
+
+    @Test
+    fun `未知动作一律降级成无而不是猜`() {
+        // 写错一个词（比如「打开网站」）绝不能变成退出宿主或跳到乱七八糟的地方。
+        val f = PluginPack.fromJson("""{"标题":"x","同意按钮":"开","同意按钮事件":{"动作":"打开网站","网址":"https://x.y"}}""")
+        assertEquals("未知动作必须降级成「无」", "无", f.buttons.first { it.slot == 0 }.action)
     }
 
     @Test
@@ -112,6 +210,39 @@ class PluginPayloadTest {
         assertTrue("字符串里的 /* 被吃了：$out", out.contains("含 // 与 /* 的正文"))
     }
 
+    @Test
+    fun `阻断原因能说清下一步`() {
+        // 三个按钮全关 → 载荷会跳过显示，UI 必须提前拦住，而不是导出完才发现「不弹」
+        val dead = PluginPack.DialogForm(buttons = PluginPack.DEFAULT_BUTTONS.map { it.copy(on = false) })
+        assertTrue("三按钮全关必须被拦住", !dead.anyButtonOn)
+
+        val noArg = PluginPack.DialogForm(
+            buttons = listOf(PluginPack.Button(slot = 0, on = true, text = "去", action = "网址", arg = ""))
+        )
+        assertEquals("选了网址却没填网址必须被拦住", 1, noArg.badButtons.size)
+
+        val ok = PluginPack.DialogForm()
+        assertTrue("默认表单应当可导出", ok.anyButtonOn && ok.badButtons.isEmpty())
+        assertNull("默认表单不该有阻断原因", ok.badButtons.firstOrNull())
+    }
+
     private fun signatureOf(m: com.android.tools.smali.dexlib2.iface.Method): String =
         "(" + m.parameterTypes.joinToString("") + ")" + m.returnType
+
+    private fun countOccurrences(hay: ByteArray, needle: ByteArray): Int {
+        if (needle.isEmpty() || hay.size < needle.size) return 0
+        var n = 0
+        var i = 0
+        outer@ while (i <= hay.size - needle.size) {
+            for (j in needle.indices) {
+                if (hay[i + j] != needle[j]) {
+                    i++
+                    continue@outer
+                }
+            }
+            n++
+            i += needle.size
+        }
+        return n
+    }
 }

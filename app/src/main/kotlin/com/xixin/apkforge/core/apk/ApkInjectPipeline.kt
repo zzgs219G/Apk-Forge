@@ -53,16 +53,15 @@ class ApkInjectPipeline(private val context: Context) {
         val targetSignature: String = "(Landroid/os/Bundle;)V",
         /** 用户粘贴的 smali 调用行（可多行、可含 # 注释） */
         val callsText: String,
-        /** payload dex；null 表示不追加 */
-        val payloadDex: File? = null,
         /**
-         * 随 payload 一起写进宿主的额外条目（path → 内容）。
+         * payload dex；null 表示不追加。
          *
-         * 插件包功能用它把 `assets/apkforge_dialog.json` 塞进宿主：
-         * 载荷 dex 只负责代码，配置必须能被用户在 MT 里直接改，
-         * 所以它是资产文件而不是编译进 dex 的常量。
+         * 注意这里**刻意没有**「额外资产」这种入参。载荷需要的配置必须烘焙进
+         * dex（见 [com.xixin.apkforge.core.dex.PayloadBaker]），理由：
+         * 注入一个包只应该让它多一个 `classesN.dex`，不该改写宿主自己的 assets。
+         * 想加资产时请先想清楚——这是产品边界的改变，不是便利性的加法。
          */
-        val extraAssets: Map<String, ByteArray> = emptyMap(),
+        val payloadDex: File? = null,
     )
 
     /**
@@ -322,14 +321,6 @@ class ApkInjectPipeline(private val context: Context) {
                     null
                 }
 
-                if (input.extraAssets.isNotEmpty()) {
-                    step(
-                        Stage.PAYLOAD, "附带资产",
-                        input.extraAssets.keys.joinToString() + " · " +
-                            input.extraAssets.values.sumOf { it.size }.let { bytes(it) },
-                    )
-                }
-
                 // ── 9. 重打包（逐条目上报，限流后约 60~80 行日志）──
                 step(
                     Stage.REPACK, "重写压缩包",
@@ -343,7 +334,6 @@ class ApkInjectPipeline(private val context: Context) {
                     targetDexName = dexName,
                     newDexBytes = newDexBytes,
                     payloadDexBytes = payloadBytes,
-                    extraEntries = input.extraAssets,
                     onEntry = { index, total, name ->
                         val bucket = if (total <= 60) index else index * 60 / total
                         if (bucket != lastReported) {
@@ -359,9 +349,6 @@ class ApkInjectPipeline(private val context: Context) {
                     Stage.REPACK, "完成",
                     "${stats.totalEntries} 条目 · ${mb(stats.originalSize)} → ${mb(stats.outputSize)}",
                 )
-                if (stats.addedAssets.isNotEmpty()) {
-                    step(Stage.REPACK, "写入资产", stats.addedAssets.joinToString())
-                }
 
                 val dur = elapsed()
                 Result(

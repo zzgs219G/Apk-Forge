@@ -65,6 +65,13 @@ class InjectEndToEndTest {
             File("app/src/main/assets/sample/DemoDialog.dex"),
         ).first { it.isFile }
 
+    /** 弹窗载荷（模板版，配置位是占位符）。烘焙测试要用它，不能用示例载荷。 */
+    private val payloadDex: File
+        get() = listOf(
+            File("src/main/assets/plugin/PayloadDialog.dex"),
+            File("app/src/main/assets/plugin/PayloadDialog.dex"),
+        ).firstOrNull { it.isFile } ?: File("src/main/assets/plugin/PayloadDialog.dex")
+
     @Test
     fun `注入到已有方法：指令在头部且 Manifest 不变`() {
         val apk = locateApk()
@@ -386,21 +393,21 @@ class InjectEndToEndTest {
     }
 
     @Test
-    fun `额外资产写进包内且同名不重复`() {
-        // 弹窗载荷靠 assets/apkforge_dialog.json 找配置。这条钉住两件事：
-        //   ① 资产真的进包了（否则载荷静默不弹）；
-        //   ② 包内原本有同名条目时是**替换**而不是写第二份
-        //      （zip 里两个同路径条目，AssetManager 取哪个是未定义的）。
+    fun `产物只多一个 dex，不改写宿主的任何其它条目`() {
+        // 这是产品边界，不是洁癖。上一版往宿主的 assets/ 写弹窗配置，用户当场就问
+        // 「你把我包里的 assets 改了？」——那个质疑是对的：注入只应该让它多一个
+        // classesN.dex，别的条目逐字节保持原样。
+        // 这条钉住：① 恰好新增一个条目；② 新增的那个是 classesN.dex；
+        //          ③ 原有条目一个不少、名字集合只比原来多那一个。
         val apk = locateApk()
         val t = pickActivity(apk)
         assumeTrue(t != null)
         val (dexName, ownerType, _) = t!!
 
-        val work = File(System.getProperty("java.io.tmpdir"), "apkforge-e2e-assets")
+        val work = File(System.getProperty("java.io.tmpdir"), "apkforge-e2e-boundary")
             .apply { mkdirs() }
         val src = TestIo.copy(apk, File(work, "src.apk"))
         val out = File(work, "out.apk").apply { delete() }
-        val out2 = File(work, "out2.apk").apply { delete() }
 
         val calls = SmaliCallParser.parseAll(SamplePayload.CALL).first
         val inj = DexCallInjector.inject(
@@ -408,40 +415,52 @@ class InjectEndToEndTest {
             DexCallInjector.Spec(ownerType, "onCreate", "(Landroid/os/Bundle;)V", calls),
         ) as DexCallInjector.Outcome.Injected
 
-        val payload = sampleDex.readBytes()
-        val assets = mapOf("assets/apkforge_dialog.json" to """{"标题":"测试"}""".toByteArray())
         val stats = ApkRepackager.repack(
             sourceApk = src,
             outputApk = out,
             targetDexName = dexName,
             newDexBytes = inj.dex,
-            payloadDexBytes = payload,
-            extraEntries = assets,
+            payloadDexBytes = sampleDex.readBytes(),
         )
-        assertTrue("应报告写入的资产", stats.addedAssets.contains("assets/apkforge_dialog.json"))
-        val landed = TestIo.readEntry(out, "assets/apkforge_dialog.json")
-        assertNotNull("资产没进包", landed)
-        assertEquals("资产内容应逐字节保留", """{"标题":"测试"}""", String(landed!!))
+        assertTrue("应报告追加的 dex 名", !stats.addedDex.isNullOrBlank())
+        assertTrue("追加的必须是 classesN.dex", Regex("""^classes\d+\.dex$""").matches(stats.addedDex!!))
 
-        // 再跑一次：同名资产必须是替换
-        val stats2 = ApkRepackager.repack(
-            sourceApk = out,
-            outputApk = out2,
-            targetDexName = dexName,
-            newDexBytes = inj.dex,
-            payloadDexBytes = null,
-            extraEntries = mapOf("assets/apkforge_dialog.json" to """{"标题":"二次"}""".toByteArray()),
-        )
-        assertTrue("替换已有资产也要报告", stats2.addedAssets.contains("assets/apkforge_dialog.json"))
+        val before = java.util.zip.ZipFile(src).use { z -> z.entries().toList().map { it.name }.toSet() }
+        val after = java.util.zip.ZipFile(out).use { z -> z.entries().toList().map { it.name }.toSet() }
         assertEquals(
-            "同名资产应被替换而不是追加",
-            """{"标题":"二次"}""",
-            String(TestIo.readEntry(out2, "assets/apkforge_dialog.json")!!),
+            "产物只该比原包多一个条目（实际多了 ${after - before}，少了 ${before - after}）",
+            before.size + 1, after.size,
         )
-        val names = java.util.zip.ZipFile(out2).use { z -> z.entries().toList().map { it.name } }
+        assertEquals("原有条目一个都不能少", emptySet<String>(), before - after)
+        assertEquals("多出来的那个只能是新 dex", setOf(stats.addedDex), after - before)
+        // 反面断言：绝不能出现任何配置文件形态的条目
+        assertTrue(
+            "不该往宿主包里写配置文件：${after.filter { it.endsWith(".json") || it.endsWith(".jsonc") }}",
+            after.none { it.endsWith(".json") || it.endsWith(".jsonc") },
+        )
+    }
+
+    @Test
+    fun `payload 的配置已经烘焙在 dex 里而不是外挂文件`() {
+        // 端到端验证「配置真的在 dex 里」：烘焙后的载荷，占位符必须消失、
+        // 配置文本必须能读回来。少了这条，最可能的失败形态是
+        // 「注入成功、产物正常、宿主启动什么都不发生」——没有报错可查。
+        assumeTrue("载荷 dex 不存在，先跑 payload/dialog/build.sh", payloadDex.isFile)
+        val json = com.xixin.apkforge.data.PluginPack.toJson(
+            com.xixin.apkforge.data.PluginPack.DialogForm()
+        )
+        val baked = when (val r = com.xixin.apkforge.core.dex.PayloadBaker.bake(payloadDex.readBytes(), json)) {
+            is com.xixin.apkforge.core.dex.PayloadBaker.Outcome.Ok -> r.dex
+            is com.xixin.apkforge.core.dex.PayloadBaker.Outcome.Failed ->
+                throw AssertionError("烘焙失败：${r.reason}")
+        }
+        assertTrue(
+            "占位符还在，运行期读到的会是占位符而不是配置",
+            String(baked, Charsets.ISO_8859_1).indexOf("__APKFORGE_CONFIG__") < 0,
+        )
         assertEquals(
-            "zip 内不该出现重复的同名条目",
-            1, names.count { it == "assets/apkforge_dialog.json" },
+            "配置必须能从 dex 里原样读回",
+            json, com.xixin.apkforge.core.dex.PayloadBaker.extract(baked),
         )
     }
 }

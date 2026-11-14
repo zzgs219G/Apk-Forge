@@ -31,6 +31,7 @@ okhttp = "4.12.0"
 smaliDexlib2 = "3.0.10"
 apksig = "9.5.1"
 
+
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
