@@ -116,15 +116,19 @@ jobs:
       # ---------- 构建示例 payload dex ----------
       # assets/sample/DemoDialog.dex 是本工程「填入示例」功能的依赖，
       # 它是构建产物而非源文件，CI 上必须重新生成，否则功能缺失。
+      - name: 准备 Android SDK
+        run: |
+          set -e
+          sh .cnb/scripts/ensure-sdk.sh
+
       - name: 生成示例 payload dex
         run: |
           set -e
-          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          SDK="${ANDROID_SDK:-${ANDROID_HOME:-$ANDROID_SDK_ROOT}}"
           echo "SDK=$SDK"
-          ANDROID_SDK="$SDK" \
-          ANDROID_JAR="$SDK/platforms/android-37/android.jar" \
-          D8="$SDK/build-tools/37.0.0/d8" \
-          bash tools/sample-payload/build.sh
+          # 不传 ANDROID_JAR / D8：交给 build.sh 自己探测。
+          # 写死路径会在 Google 改目录命名时静默失效（android-37 → android-37.0）。
+          ANDROID_SDK="$SDK" bash tools/sample-payload/build.sh
           echo "---- 产物 ----"
           ls -la app/src/main/assets/sample/
           # 魔数校验：不是 dex 就当场失败，别等运行时才发现「示例」用不了

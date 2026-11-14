@@ -319,7 +319,6 @@ false，导致改写后的方法没被替换进类。改为按「名字 + 签名
 | 加固包检测 | 中 | 读 dex 时若发现类数异常少 / 字符串全是乱码，提前提示「疑似加固包」 |
 | 幂等保护 | 低 | 注入前检查目标方法首条指令是否已是目标调用 |
 | 重签名 | 高 | 需解决 `apksig` 的 `java.util.stream` 依赖，或调系统 `apksigner` |
-| 云端构建 | 低 | 参考 `jian_box/.github/workflows/build-apk.yml` |
 | SVG 外部化 | 低 | 动画路径从 Kotlin 硬编码改到 `res/raw/*.svg` |
 
 ---

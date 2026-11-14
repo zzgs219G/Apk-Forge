@@ -75,7 +75,7 @@ kotlin.incremental=true
 | AGP | 9.3.0 | 本地缓存最高版本；9.4.1 未缓存 |
 | Kotlin | 2.4.10 | 同上 |
 | JDK | 21 | `compileOptions` 与 `jvmToolchain(21)` 统一 |
-| compileSdk / minSdk / targetSdk | 37 / 28 / 34 | |
+| compileSdk / minSdk / targetSdk | 37 / 28 / 34 | 平台包名是 `platforms;android-37.0`，目录 `android-37.0` |
 
 ```bash
 # 本地构建
@@ -83,6 +83,20 @@ sh gradlew assembleDebug
 
 # 跑验证（用真实 APK）
 sh gradlew :app:testDebugUnitTest
+```
+
+### 云端构建
+
+CI 用的公共镜像只预装 android-35/36，而本工程 compileSdk=37，
+所以流水线第一步会跑 `.cnb/scripts/ensure-sdk.sh` 补齐平台与 build-tools。
+
+脚本不写死包名和路径，而是从 `app/build.gradle.kts` 读 `compileSdk` 后向
+`sdkmanager --list` 查询实际包名（API 36 之后 Google 把平台包名改成了
+`主版本.次版本`，目录也从 `android-37` 变成 `android-37.0`）。
+本地想手动补也可以直接跑：
+
+```bash
+sh .cnb/scripts/ensure-sdk.sh
 ```
 
 ---

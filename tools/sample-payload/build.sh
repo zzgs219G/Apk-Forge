@@ -40,19 +40,27 @@ fi
 echo "SDK = $SDK"
 
 # ── android.jar：取 platforms 下最高版本 ──
+# ⚠️ 目录名有两种形态，必须都认：
+#   android-35 / android-36      整数（API 36 及以前）
+#   android-37.0 / android-36.1  主版本.次版本（API 36 之后 Google 改的命名）
+# 早期实现用 `case "$n" in *[!0-9]*) continue` 过滤「非纯数字」，
+# 结果把 android-37.0 整个跳过 → 明明装了平台却报「找不到 android.jar」。
+# 现在按「点分版本号」逐段比大小，预览版（android-37.2-beta1）跳过。
+platform_dirs() {
+  for d in "$SDK"/platforms/android-*; do
+    [ -f "$d/android.jar" ] || continue
+    n=${d##*/android-}
+    # 含字母的一律跳过：-beta1 / -ext19 / canary 之类，不是稳定 base 平台
+    case "$n" in (*[!0-9.]*|"") continue ;; esac
+    echo "$n $d"
+  done | sort -t. -k1,1n -k2,2n -k3,3n
+}
+
 pick_android_jar() {
   if [ -n "${ANDROID_JAR:-}" ] && [ -f "${ANDROID_JAR}" ]; then
     echo "${ANDROID_JAR}"; return
   fi
-  best=""
-  bestN=0
-  for d in "$SDK"/platforms/android-*; do
-    [ -f "$d/android.jar" ] || continue
-    n=$(echo "$d" | sed 's/.*android-//')
-    case "$n" in (*[!0-9]*|"") continue ;; esac
-    if [ "$n" -gt "$bestN" ]; then bestN="$n"; best="$d/android.jar"; fi
-  done
-  echo "$best"
+  platform_dirs | tail -1 | cut -d' ' -f2- | sed 's|$|/android.jar|'
 }
 JAR=$(pick_android_jar)
 [ -n "$JAR" ] && [ -f "$JAR" ] || {
@@ -64,18 +72,20 @@ JAR=$(pick_android_jar)
 echo "android.jar = $JAR"
 
 # ── d8：取 build-tools 下最高版本 ──
+# 早期实现直接 `for d in "$SDK"/build-tools/*/d8`，靠 shell glob 顺序（字典序）
+# 拿第一个，等于随机挑版本：装了 36.0.0 和 37.0.0 时可能用上 36。
+# 改成显式按版本号排序取最大。
 pick_d8() {
   if [ -n "${D8:-}" ] && [ -f "${D8}" ]; then
     echo "${D8}"; return
   fi
-  for d in "$SDK"/build-tools/*/d8 "$SDK"/build-tools/*/lib/d8.jar; do
-    [ -e "$d" ] && { echo "$d"; return; }
-  done
-  # 兜底：从任意 build-tools 里找 d8.jar，用 java 起
-  for j in "$SDK"/build-tools/*/lib/d8.jar; do
-    [ -f "$j" ] && { echo "jar:$j"; return; }
-  done
-  echo ""
+  best=""
+  for d in "$SDK"/build-tools/*; do
+    [ -x "$d/d8" ] || continue
+    v=${d##*/}
+    case "$v" in (*[!0-9.]*|"") continue ;; esac
+    echo "$v $d/d8"
+  done | sort -t. -k1,1n -k2,2n -k3,3n | tail -1 | cut -d' ' -f2-
 }
 D8=$(pick_d8)
 [ -n "$D8" ] || {

@@ -17,7 +17,7 @@ main:
   pull_request:
   - name: PR 编译门禁
     docker:
-      image: mobiledevops/android-sdk-image:34.0.1
+      image: mobiledevops/android-sdk-image:36.1.0
     ifModify:
     - app/**
     - gradle/**
@@ -25,10 +25,12 @@ main:
     - settings.gradle.kts
     - .cnb/**
     stages:
-    - name: 生成示例 payload dex
-      script: "set -e\nSDK=\"${ANDROID_HOME:-$ANDROID_SDK_ROOT}\"\nANDROID_SDK=\"$SDK\" ANDROID_JAR=\"$SDK/platforms/android-37/android.jar\" D8=\"$SDK/build-tools/37.0.0/d8\" bash tools/sample-payload/build.sh\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || { echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
+    - name: 准备 SDK 与示例 dex
+      # 平台/build-tools 由脚本按 compileSdk 推导补齐（见脚本顶部注释），
+      # 随后生成示例 dex —— 它是构建产物，CI 上必须重造。
+      script: "set -e\nsh .cnb/scripts/ensure-sdk.sh\n\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\necho \"SDK=$SDK\"\nANDROID_SDK=\"$SDK\" bash tools/sample-payload/build.sh\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q dex || {\n  echo \"示例 dex 魔数错误\"; exit 1; }\n"
     - name: 编译 Debug
-      script: "set -e\nexport LANG=C.UTF-8 LC_ALL=C.UTF-8\n./gradlew assembleDebug \\\n  -Dorg.gradle.jvmargs=\"-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8\" \\\n  --configuration-cache --stacktrace --console=plain 2>&1 | tee build-log/compile.log\n"
+      script: "set -e\nexport LANG=C.UTF-8 LC_ALL=C.UTF-8\n# tee 的目标目录必须先建（同 pipeline-test 的说明）\nmkdir -p build-log\n./gradlew assembleDebug \\\n  -Dorg.gradle.jvmargs=\"-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8\" \\\n  --configuration-cache --stacktrace --console=plain 2>&1 | tee build-log/compile.log\n"
     - name: 失败时抓关键报错
       if: failure()
       script: "mkdir -p build-log\n{\n  echo \"===== Kotlin 编译错误 =====\"\n  grep -nE \"^e: \" build-log/compile.log 2>/dev/null | head -60 || true\n  echo \"\"\n  echo \"===== 根因 =====\"\n  grep -nA8 \"What went wrong:\" build-log/compile.log 2>/dev/null | head -40 || true\n  echo \"\"\n  echo \"===== 依赖解析失败 =====\"\n  grep -nE \"Could not resolve|Failed to resolve|Could not find\" build-log/compile.log 2>/dev/null | head -20 || true\n} | tee build-log/error-summary.txt\n"

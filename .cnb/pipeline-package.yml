@@ -22,14 +22,20 @@ main:
   web_trigger_package:
   - name: 云端打包 APK
     docker:
-      image: mobiledevops/android-sdk-image:34.0.1
+      image: mobiledevops/android-sdk-image:36.1.0
     stages:
     - name: 计算版本号
       script: "set -e\nsh .cnb/scripts/resolve-version.sh\n"
-    - name: 补齐 android-37 平台
-      script: "set -e\n# 镜像 mobiledevops/android-sdk-image:34.0.1 只预装 android-35/36\n# (见其仓库 packages.txt)，而本工程 compileSdk=37，必须补装。\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\necho \"SDK=$SDK\"\nif [ -f \"$SDK/platforms/android-37/android.jar\" ]; then\n  echo \"✔ android-37 已存在，跳过\"\nelse\n  echo \"⬇ 安装 platforms;android-37 + build-tools;37.0.0\"\n  yes | \"$SDK/cmdline-tools/latest/bin/sdkmanager\" --sdk_root=\"$SDK\" \\\n    \"platform-tools\" \"platforms;android-37\" \"build-tools;37.0.0\" || {\n    echo \"❌ sdkmanager 安装失败\"; exit 1; }\nfi\nls -1 \"$SDK/platforms\"\n"
+    - name: 准备 Android SDK
+      # 逻辑收敛到 .cnb/scripts/ensure-sdk.sh，三个入口共用一份。
+      # 顶部注释说明了为什么不能写死包名、也不能写死 sdkmanager 路径。
+      script: "set -e\nsh .cnb/scripts/ensure-sdk.sh\n"
     - name: 生成示例 payload dex
-      script: "set -e\n# assets/sample/DemoDialog.dex 是「载入示例」功能的依赖，\n# 它是构建产物而非源文件，CI 上必须重新生成。\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\necho \"SDK=$SDK\"\nANDROID_SDK=\"$SDK\" \\\nbash tools/sample-payload/build.sh\nls -la app/src/main/assets/sample/\n# 魔数校验：不是合法 dex 当场失败，别等运行时才发现示例用不了\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || {\n  echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
+      # assets/sample/DemoDialog.dex 是「载入示例」功能的依赖，
+      # 它是构建产物而非源文件，CI 上必须重新生成。
+      # 只传 SDK 根目录：android.jar 与 d8 由 build.sh 自己探测。
+      # 这里传死路径等于把探测逻辑废掉（android-37 与 android-37.0 都出现过）。
+      script: "set -e\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\necho \"SDK=$SDK\"\nANDROID_SDK=\"$SDK\" bash tools/sample-payload/build.sh\nls -la app/src/main/assets/sample/\n# 魔数校验：不是合法 dex 当场失败，别等运行时才发现示例用不了\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q dex || {\n  echo \"示例 dex 魔数错误\"; exit 1; }\n"
     - name: 确定打包类型
       script: "if [ \"$CNB_IS_TAG\" = \"true\" ]; then\n  GRADLE_TASK=\"assembleRelease\"\n  PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"正式版(release)\" ]; then\n  GRADLE_TASK=\"assembleRelease\"\n  PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"全部(both)\" ]; then\n  GRADLE_TASK=\"assembleDebug assembleRelease\"\n  PKG_TYPE=\"全部\"\nelse\n  GRADLE_TASK=\"assembleDebug\"\n  PKG_TYPE=\"测试版\"\nfi\nmkdir -p /tmp/cnb\necho \"GRADLE_TASK='$GRADLE_TASK'\" >> /tmp/cnb/vars.sh\necho \"PKG_TYPE='$PKG_TYPE'\" >> /tmp/cnb/vars.sh\necho \"打包类型=$PKG_TYPE 任务=$GRADLE_TASK\"\n"
     - name: 准备签名配置
@@ -60,14 +66,20 @@ main:
   api_trigger:
   - name: API 打包
     docker:
-      image: mobiledevops/android-sdk-image:34.0.1
+      image: mobiledevops/android-sdk-image:36.1.0
     stages:
     - name: 计算版本号
       script: "set -e\nsh .cnb/scripts/resolve-version.sh\n"
-    - name: 补齐 android-37 平台
-      script: "set -e\n# 镜像 mobiledevops/android-sdk-image:34.0.1 只预装 android-35/36\n# (见其仓库 packages.txt)，而本工程 compileSdk=37，必须补装。\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\necho \"SDK=$SDK\"\nif [ -f \"$SDK/platforms/android-37/android.jar\" ]; then\n  echo \"✔ android-37 已存在，跳过\"\nelse\n  echo \"⬇ 安装 platforms;android-37 + build-tools;37.0.0\"\n  yes | \"$SDK/cmdline-tools/latest/bin/sdkmanager\" --sdk_root=\"$SDK\" \\\n    \"platform-tools\" \"platforms;android-37\" \"build-tools;37.0.0\" || {\n    echo \"❌ sdkmanager 安装失败\"; exit 1; }\nfi\nls -1 \"$SDK/platforms\"\n"
+    - name: 准备 Android SDK
+      # 逻辑收敛到 .cnb/scripts/ensure-sdk.sh，三个入口共用一份。
+      # 顶部注释说明了为什么不能写死包名、也不能写死 sdkmanager 路径。
+      script: "set -e\nsh .cnb/scripts/ensure-sdk.sh\n"
     - name: 生成示例 payload dex
-      script: "set -e\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\nANDROID_SDK=\"$SDK\" bash tools/sample-payload/build.sh\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || { echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
+      # assets/sample/DemoDialog.dex 是「载入示例」功能的依赖，
+      # 它是构建产物而非源文件，CI 上必须重新生成。
+      # 只传 SDK 根目录：android.jar 与 d8 由 build.sh 自己探测。
+      # 这里传死路径等于把探测逻辑废掉（android-37 与 android-37.0 都出现过）。
+      script: "set -e\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\necho \"SDK=$SDK\"\nANDROID_SDK=\"$SDK\" bash tools/sample-payload/build.sh\nls -la app/src/main/assets/sample/\n# 魔数校验：不是合法 dex 当场失败，别等运行时才发现示例用不了\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q dex || {\n  echo \"示例 dex 魔数错误\"; exit 1; }\n"
     - name: 确定打包类型
       script: "if [ \"$CNB_IS_TAG\" = \"true\" ]; then\n  GRADLE_TASK=\"assembleRelease\"; PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"正式版(release)\" ]; then\n  GRADLE_TASK=\"assembleRelease\"; PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"全部(both)\" ]; then\n  GRADLE_TASK=\"assembleDebug assembleRelease\"; PKG_TYPE=\"全部\"\nelse\n  GRADLE_TASK=\"assembleDebug\"; PKG_TYPE=\"测试版\"\nfi\nmkdir -p /tmp/cnb\necho \"GRADLE_TASK='$GRADLE_TASK'\" >> /tmp/cnb/vars.sh\necho \"PKG_TYPE='$PKG_TYPE'\" >> /tmp/cnb/vars.sh\n"
     - name: 准备签名配置
@@ -99,14 +111,20 @@ v*:
   tag_push:
   - name: 标签发布 · 自动正式版
     docker:
-      image: mobiledevops/android-sdk-image:34.0.1
+      image: mobiledevops/android-sdk-image:36.1.0
     stages:
     - name: 计算版本号
       script: "set -e\nsh .cnb/scripts/resolve-version.sh\n"
-    - name: 补齐 android-37 平台
-      script: "set -e\n# 镜像 mobiledevops/android-sdk-image:34.0.1 只预装 android-35/36\n# (见其仓库 packages.txt)，而本工程 compileSdk=37，必须补装。\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\necho \"SDK=$SDK\"\nif [ -f \"$SDK/platforms/android-37/android.jar\" ]; then\n  echo \"✔ android-37 已存在，跳过\"\nelse\n  echo \"⬇ 安装 platforms;android-37 + build-tools;37.0.0\"\n  yes | \"$SDK/cmdline-tools/latest/bin/sdkmanager\" --sdk_root=\"$SDK\" \\\n    \"platform-tools\" \"platforms;android-37\" \"build-tools;37.0.0\" || {\n    echo \"❌ sdkmanager 安装失败\"; exit 1; }\nfi\nls -1 \"$SDK/platforms\"\n"
+    - name: 准备 Android SDK
+      # 逻辑收敛到 .cnb/scripts/ensure-sdk.sh，三个入口共用一份。
+      # 顶部注释说明了为什么不能写死包名、也不能写死 sdkmanager 路径。
+      script: "set -e\nsh .cnb/scripts/ensure-sdk.sh\n"
     - name: 生成示例 payload dex
-      script: "set -e\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\nANDROID_SDK=\"$SDK\" bash tools/sample-payload/build.sh\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || { echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
+      # assets/sample/DemoDialog.dex 是「载入示例」功能的依赖，
+      # 它是构建产物而非源文件，CI 上必须重新生成。
+      # 只传 SDK 根目录：android.jar 与 d8 由 build.sh 自己探测。
+      # 这里传死路径等于把探测逻辑废掉（android-37 与 android-37.0 都出现过）。
+      script: "set -e\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\necho \"SDK=$SDK\"\nANDROID_SDK=\"$SDK\" bash tools/sample-payload/build.sh\nls -la app/src/main/assets/sample/\n# 魔数校验：不是合法 dex 当场失败，别等运行时才发现示例用不了\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q dex || {\n  echo \"示例 dex 魔数错误\"; exit 1; }\n"
     - name: 确定打包类型
       script: "GRADLE_TASK=\"assembleRelease\"; PKG_TYPE=\"正式版\"\nmkdir -p /tmp/cnb\necho \"GRADLE_TASK='$GRADLE_TASK'\" >> /tmp/cnb/vars.sh\necho \"PKG_TYPE='$PKG_TYPE'\" >> /tmp/cnb/vars.sh\n"
     - name: 准备签名配置
