@@ -1,0 +1,238 @@
+name: 云端打包 APK
+
+# ============================================================
+#  ApkForge · 云端打包流水线
+#
+#  参考 jian_box/.github/workflows/build-apk.yml 的结构，
+#  按本工程实际做了裁剪：无签名密钥流程（本工程不做重签名）、
+#  无混淆产物、多一步「示例 payload dex 必须随包产出」的校验。
+#
+#  触发方式：
+#   ① 手动 —— Actions → 云端打包 APK → Run workflow
+#   ② 打标签 —— git tag v0.2.0 && git push origin v0.2.0
+#
+#  产出 Artifact：
+#   - ApkForge-测试版-v*.apk  （含 checksums.txt）
+#   - 构建日志-*              （gradle 日志 + 单测报告，排查用）
+# ============================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 打包类型
+        required: true
+        type: choice
+        default: "测试版(debug)"
+        options:
+          - "测试版(debug)"
+          - "正式版(release)"
+          - "全部(both)"
+      version_code:
+        description: 版本号，整数(如 2)或版本名(如 0.2.0)均可；留空=1(1.0)
+        required: false
+        type: string
+        default: ""
+      run_tests:
+        description: 是否跑单元测试（注入核心的真实 APK 验证）
+        required: true
+        type: choice
+        default: "跑测试（推荐）"
+        options:
+          - "跑测试（推荐）"
+          - "跳过测试"
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: 云端打包
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # ---------- 版本号 ----------
+      - name: 计算版本号
+        env:
+          MANUAL: ${{ inputs.version_code }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -e
+          if [[ "$TAG" == v* ]]; then
+            VERSION_NAME="${TAG#v}"
+            VERSION_CODE=$(echo "$VERSION_NAME" | awk -F. '{printf "%d", $1*100+$2*10+$3}')
+          elif [[ -n "$MANUAL" ]]; then
+            if [[ "$MANUAL" =~ ^[0-9]+$ ]]; then
+              VERSION_CODE="$MANUAL"
+              VERSION_NAME="$((MANUAL/100)).$(((MANUAL%100)/10)).$((MANUAL%10))"
+            elif [[ "$MANUAL" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              VERSION_NAME="$MANUAL"
+              VERSION_CODE=$(echo "$MANUAL" | awk -F. '{printf "%d", $1*100+$2*10+$3}')
+            else
+              echo "❌ 版本号需为整数或 x.y.z，收到：$MANUAL"; exit 1
+            fi
+          else
+            VERSION_NAME="1.0"; VERSION_CODE="100"
+            echo "⚠ 未填版本号，使用默认 $VERSION_NAME($VERSION_CODE)"
+          fi
+          echo "VERSION_NAME=$VERSION_NAME" >> "$GITHUB_ENV"
+          echo "VERSION_CODE=$VERSION_CODE" >> "$GITHUB_ENV"
+          echo "✔ 版本 $VERSION_NAME($VERSION_CODE)"
+
+      - name: 确定打包任务
+        run: |
+          BT="${{ inputs.build_type }}"
+          [ "${{ github.event_name }}" = "push" ] && BT="正式版(release)"
+          case "$BT" in
+            "正式版(release)") echo "GRADLE_TASK=assembleRelease"; echo "PKG=正式版" >> "$GITHUB_ENV" ;;
+            "全部(both)")       echo "GRADLE_TASK=assembleDebug assembleRelease"; echo "PKG=全部" >> "$GITHUB_ENV" ;;
+            *)                  echo "GRADLE_TASK=assembleDebug"; echo "PKG=测试版" >> "$GITHUB_ENV" ;;
+          esac
+          echo "GRADLE_TASK=$GRADLE_TASK" >> "$GITHUB_ENV"
+          echo "✔ 任务=$GRADLE_TASK  类型=$(grep PKG <<< "$(cat $GITHUB_ENV)" | tail -1 | cut -d= -f2)"
+
+      - name: 设置 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: 设置 Gradle 缓存
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          add-job-summary: on-failure
+
+      # ---------- 构建示例 payload dex ----------
+      # assets/sample/DemoDialog.dex 是本工程「填入示例」功能的依赖，
+      # 它是构建产物而非源文件，CI 上必须重新生成，否则功能缺失。
+      - name: 生成示例 payload dex
+        run: |
+          set -e
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          echo "SDK=$SDK"
+          ANDROID_SDK="$SDK" \
+          ANDROID_JAR="$SDK/platforms/android-37/android.jar" \
+          D8="$SDK/build-tools/37.0.0/d8" \
+          bash tools/sample-payload/build.sh
+          echo "---- 产物 ----"
+          ls -la app/src/main/assets/sample/
+          # 魔数校验：不是 dex 就当场失败，别等运行时才发现「示例」用不了
+          head -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q "dex" || {
+            echo "❌ 示例 dex 魔数错误"; exit 1; }
+
+      # ---------- 单元测试 ----------
+      - name: 🧪 单元测试（真实 APK 端到端）
+        if: ${{ inputs.run_tests != '跳过测试' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p build-log
+          ./gradlew testDebugUnitTest \
+            -Dorg.gradle.jvmargs="-Xmx4g" \
+            --stacktrace --console=plain \
+            2>&1 | tee build-log/test.log
+
+      # ---------- 打包 ----------
+      - name: 🏗️ 执行打包：${{ env.GRADLE_TASK }}
+        shell: bash
+        env:
+          APP_VERSION_NAME: ${{ env.VERSION_NAME }}
+          APP_VERSION_CODE: ${{ env.VERSION_CODE }}
+        run: |
+          set -o pipefail
+          mkdir -p build-log
+          # shellcheck disable=SC2086
+          ./gradlew ${GRADLE_TASK} \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g" \
+            -PversionName="${{ env.VERSION_NAME }}" \
+            -PversionCode="${{ env.VERSION_CODE }}" \
+            --configuration-cache --stacktrace --console=plain \
+            2>&1 | tee build-log/gradle.log
+
+      # ---------- 整理产物 ----------
+      - name: 📦 整理 APK
+        if: success()
+        run: |
+          set -e
+          case "$GRADLE_TASK" in
+            assembleRelease)              DIRS="app/build/outputs/apk/release" ;;
+            "assembleDebug assembleRelease") DIRS="app/build/outputs/apk/release app/build/outputs/apk/debug" ;;
+            *)                            DIRS="app/build/outputs/apk/debug" ;;
+          esac
+          mkdir -p dist
+          SHA=$(git rev-parse --short HEAD)
+          DATE=$(date +%Y%m%d-%H%M)
+          COUNT=0
+          for D in $DIRS; do
+            case "$D" in *release*) TYPE="正式版" ;; *) TYPE="测试版" ;; esac
+            for f in "$D"/*.apk; do
+              [ -e "$f" ] || continue
+              BASE="ApkForge-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}"
+              cp "$f" "dist/${BASE}.apk"
+              echo "✔ dist/${BASE}.apk"
+              COUNT=$((COUNT+1))
+            done
+          done
+          [ "$COUNT" -gt 0 ] || { echo "❌ 未生成 APK"; exit 1; }
+          sha256sum dist/*.apk > dist/checksums.txt
+          ls -lh dist/
+
+      - name: ⬆️ 上传 APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "ApkForge-${{ env.PKG }}-v${{ env.VERSION_NAME }}"
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: ⬆️ 上传构建日志与测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: "构建日志-${{ env.PKG }}-v${{ env.VERSION_NAME }}"
+          path: |
+            build-log/
+            app/build/reports/tests/
+            app/build/test-results/
+          if-no-files-found: warn
+          retention-days: 7
+
+      # ---------- 失败时抓关键报错 ----------
+      - name: 🐞 生成精简报错摘要
+        if: failure()
+        shell: bash
+        run: |
+          SUM="build-log/error-summary.txt"
+          mkdir -p build-log
+          {
+            echo "========== ApkForge 构建失败 · 精简摘要 =========="
+            echo ""
+            echo "===== ① 失败任务 ====="
+            grep -nE "> Task .*FAILED" build-log/*.log 2>/dev/null | head -20 || true
+            echo ""
+            echo "===== ② Kotlin 编译错误 ====="
+            grep -nE "^e: " build-log/*.log 2>/dev/null | head -60 || true
+            echo ""
+            echo "===== ③ 测试失败断言（关键：注入逻辑的真 bug） ====="
+            grep -nE "AssertionError|ComparisonFailure|FAILED$" build-log/test.log 2>/dev/null | head -30 || true
+            echo ""
+            echo "===== ④ 根因 ====="
+            grep -nA8 "What went wrong:" build-log/*.log 2>/dev/null | head -50 || true
+            echo ""
+            echo "===== ⑤ 依赖解析问题 ====="
+            grep -nE "Could not resolve|Failed to resolve|Could not find" build-log/*.log 2>/dev/null | head -20 || true
+          } | tee "$SUM"
+          echo ""
+          echo "✅ 摘要已生成：$SUM（把这个文件给 AI 即可，不用整个日志）"

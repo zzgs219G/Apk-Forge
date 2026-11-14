@@ -1,0 +1,30 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# 本地配置（含绝对路径，不入库）
+local.properties
+
+# IDE
+.idea/
+*.iml
+.kotlin/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 构建产物
+*.apk
+*.aab
+*.ap_
+*.dex
+!app/src/main/assets/sample/*.dex
+
+# 示例 payload 的中间产物（源码在 tools/sample-payload/src，dex 在 assets）
+tools/sample-payload/build/
+
+# 日志
+*.log
+build-log/

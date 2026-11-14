@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 注入产物放在 getExternalFilesDir(null)/output 下，导出时通过 FileProvider 分享 -->
+    <external-files-path name="output" path="output/" />
+    <cache-path name="cache" path="." />
+</paths>
