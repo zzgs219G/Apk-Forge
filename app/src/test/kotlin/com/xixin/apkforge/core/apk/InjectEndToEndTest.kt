@@ -349,4 +349,99 @@ class InjectEndToEndTest {
         val (bad, badErrs) = SmaliCallParser.parseAll("this is not smali")
         assertTrue("非法行应报错", bad.isEmpty() && !badErrs.isEmpty)
     }
+
+    @Test
+    fun `替换方法体会丢掉原指令但保留父类调用`() {
+        // 防的是「replaceBody 只清了一半」：原逻辑还在跑，用户以为已经打桩。
+        // 同时钉住父类调用必须留着 —— 生命周期方法不调 super 会让宿主状态机断裂。
+        val apk = locateApk()
+        val t = pickActivity(apk)
+        assumeTrue(t != null)
+        val (dexName, ownerType, _) = t!!
+
+        val calls = SmaliCallParser.parseAll(SamplePayload.CALL).first
+        val outcome = DexCallInjector.inject(
+            TestIo.readEntry(apk, dexName)!!,
+            DexCallInjector.Spec(
+                ownerType, "onCreate", "(Landroid/os/Bundle;)V", calls, replaceBody = true,
+            ),
+        )
+        assertTrue("应成功，实际 $outcome", outcome is DexCallInjector.Outcome.Injected)
+        val inj = outcome as DexCallInjector.Outcome.Injected
+
+        val df = loadDex(inj.dex)!!
+        val m = df.classes.first { it.type == ownerType }
+            .methods.first {
+                it.name == "onCreate" &&
+                    it.parameterTypes.map { p -> p.toString() } == listOf("Landroid/os/Bundle;")
+            }
+        val insns = m.implementation!!.instructions.toList()
+        assertEquals(
+            "替换方法体内应只剩「注入调用 + return」两条",
+            2, insns.size,
+        )
+        assertEquals("第一条应是注入的 invoke-static", Opcode.INVOKE_STATIC, insns[0].opcode)
+        assertEquals("最后一条必须补 return-void，否则 dex 非法", Opcode.RETURN_VOID, insns[1].opcode)
+        assertNotNull("产物 dex 必须仍可解析", df)
+    }
+
+    @Test
+    fun `额外资产写进包内且同名不重复`() {
+        // 弹窗载荷靠 assets/apkforge_dialog.json 找配置。这条钉住两件事：
+        //   ① 资产真的进包了（否则载荷静默不弹）；
+        //   ② 包内原本有同名条目时是**替换**而不是写第二份
+        //      （zip 里两个同路径条目，AssetManager 取哪个是未定义的）。
+        val apk = locateApk()
+        val t = pickActivity(apk)
+        assumeTrue(t != null)
+        val (dexName, ownerType, _) = t!!
+
+        val work = File(System.getProperty("java.io.tmpdir"), "apkforge-e2e-assets")
+            .apply { mkdirs() }
+        val src = TestIo.copy(apk, File(work, "src.apk"))
+        val out = File(work, "out.apk").apply { delete() }
+        val out2 = File(work, "out2.apk").apply { delete() }
+
+        val calls = SmaliCallParser.parseAll(SamplePayload.CALL).first
+        val inj = DexCallInjector.inject(
+            TestIo.readEntry(src, dexName)!!,
+            DexCallInjector.Spec(ownerType, "onCreate", "(Landroid/os/Bundle;)V", calls),
+        ) as DexCallInjector.Outcome.Injected
+
+        val payload = sampleDex.readBytes()
+        val assets = mapOf("assets/apkforge_dialog.json" to """{"标题":"测试"}""".toByteArray())
+        val stats = ApkRepackager.repack(
+            sourceApk = src,
+            outputApk = out,
+            targetDexName = dexName,
+            newDexBytes = inj.dex,
+            payloadDexBytes = payload,
+            extraEntries = assets,
+        )
+        assertTrue("应报告写入的资产", stats.addedAssets.contains("assets/apkforge_dialog.json"))
+        val landed = TestIo.readEntry(out, "assets/apkforge_dialog.json")
+        assertNotNull("资产没进包", landed)
+        assertEquals("资产内容应逐字节保留", """{"标题":"测试"}""", String(landed!!))
+
+        // 再跑一次：同名资产必须是替换
+        val stats2 = ApkRepackager.repack(
+            sourceApk = out,
+            outputApk = out2,
+            targetDexName = dexName,
+            newDexBytes = inj.dex,
+            payloadDexBytes = null,
+            extraEntries = mapOf("assets/apkforge_dialog.json" to """{"标题":"二次"}""".toByteArray()),
+        )
+        assertTrue("替换已有资产也要报告", stats2.addedAssets.contains("assets/apkforge_dialog.json"))
+        assertEquals(
+            "同名资产应被替换而不是追加",
+            """{"标题":"二次"}""",
+            String(TestIo.readEntry(out2, "assets/apkforge_dialog.json")!!),
+        )
+        val names = java.util.zip.ZipFile(out2).use { z -> z.entries().toList().map { it.name } }
+        assertEquals(
+            "zip 内不该出现重复的同名条目",
+            1, names.count { it == "assets/apkforge_dialog.json" },
+        )
+    }
 }

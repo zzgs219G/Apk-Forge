@@ -29,9 +29,21 @@ class ConfigStore(context: Context) {
         val id: String,
         val name: String,
         val calls: String,
-        val targetMethod: String = "onCreate",
-        val targetSignature: String = "(Landroid/os/Bundle;)V",
+        /**
+         * 注入模式。配置只管「注入什么 + 怎么铺」，不管「注到哪个类的哪个方法」——
+         * 后者是包自己的属性（每个包的 Lifecycle 方法集合都不一样）。
+         */
+        val mode: com.xixin.apkforge.core.dex.InjectionMode =
+            com.xixin.apkforge.core.dex.InjectionMode.ONCE,
         val dexPath: String? = null,
+        /**
+         * 要随 dex 一起写进宿主的额外资产：宿主包内路径 → 本机文件路径。
+         *
+         * 目前唯一的用途是弹窗载荷的 `assets/apkforge_dialog.json`。
+         * 它是 JSON 而不是代码，所以不能交给「调用行」表达——
+         * 没有这条，载荷会在运行时找不到配置，表现为「注入成功、不弹窗」。
+         */
+        val assets: Map<String, String> = emptyMap(),
         val createdAt: Long = System.currentTimeMillis(),
         val updatedAt: Long = System.currentTimeMillis(),
     ) {
@@ -44,6 +56,10 @@ class ConfigStore(context: Context) {
 
         val dexSizeKb: Long
             get() = dexFile?.takeIf { it.isFile }?.length()?.div(1024) ?: 0
+
+        /** 有几份资产文件还在磁盘上（丢了的要在 UI 上明说） */
+        val assetsReady: Int
+            get() = assets.count { (_, path) -> File(path).isFile }
     }
 
     fun list(): List<Config> {
@@ -66,8 +82,8 @@ class ConfigStore(context: Context) {
         id: String?,
         name: String,
         calls: String,
-        targetMethod: String,
-        targetSignature: String,
+        mode: com.xixin.apkforge.core.dex.InjectionMode,
+        assets: Map<String, String> = emptyMap(),
         dexSource: File?,
         keepExistingDexIfNull: Boolean = true,
     ): Config {
@@ -97,8 +113,8 @@ class ConfigStore(context: Context) {
             id = newId,
             name = name.ifBlank { "未命名配置" },
             calls = calls,
-            targetMethod = targetMethod,
-            targetSignature = targetSignature,
+            mode = mode,
+            assets = assets.ifEmpty { existing?.assets ?: emptyMap() },
             dexPath = storedDex,
             createdAt = existing?.createdAt ?: System.currentTimeMillis(),
             updatedAt = System.currentTimeMillis(),
@@ -141,8 +157,10 @@ class ConfigStore(context: Context) {
         put("id", c.id)
         put("name", c.name)
         put("calls", c.calls)
-        put("targetMethod", c.targetMethod)
-        put("targetSignature", c.targetSignature)
+        put("mode", c.mode.name)
+        put("assets", JSONObject().apply {
+            c.assets.forEach { (k, v) -> put(k, v) }
+        })
         put("dexPath", c.dexPath ?: JSONObject.NULL)
         put("createdAt", c.createdAt)
         put("updatedAt", c.updatedAt)
@@ -152,8 +170,12 @@ class ConfigStore(context: Context) {
         id = o.getString("id"),
         name = o.optString("name", "未命名配置"),
         calls = o.optString("calls", ""),
-        targetMethod = o.optString("targetMethod", "onCreate"),
-        targetSignature = o.optString("targetSignature", "(Landroid/os/Bundle;)V"),
+        mode = com.xixin.apkforge.core.dex.InjectionMode.entries
+            .firstOrNull { it.name == o.optString("mode", "ONCE") }
+            ?: com.xixin.apkforge.core.dex.InjectionMode.ONCE,
+        assets = o.optJSONObject("assets")?.let { obj ->
+            buildMap { obj.keys().forEach { k -> obj.optString(k).takeIf { it.isNotBlank() }?.let { put(k, it) } } }
+        } ?: emptyMap(),
         dexPath = if (o.isNull("dexPath")) null
         else o.optString("dexPath").takeIf { it.isNotBlank() },
         createdAt = o.optLong("createdAt", 0L),

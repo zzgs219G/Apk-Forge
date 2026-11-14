@@ -6,12 +6,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.compose.ui.graphics.ImageBitmap
 import com.xixin.apkforge.core.apk.ApkInjectPipeline
 import com.xixin.apkforge.core.dex.ClassInspector
+import com.xixin.apkforge.core.dex.InjectionMode
 import com.xixin.apkforge.core.dex.ExistingMethod
 import com.xixin.apkforge.core.dex.LifecyclePoints
 import com.xixin.apkforge.core.dex.SamplePayload
 import com.xixin.apkforge.core.dex.SmaliCallParser
+import com.xixin.apkforge.data.ApkMeta
 import com.xixin.apkforge.data.ConfigStore
 import com.xixin.apkforge.data.OutputStore
 import com.xixin.apkforge.data.TaskStore
@@ -34,14 +37,27 @@ enum class ConsoleStatus(val label: String) {
 data class ConsoleUiState(
     /** 当前任务的 APK（复制进私有目录后的稳定副本，历史记录也指向它） */
     val apkFile: File? = null,
+    /** 文件名（`app-debug.apk`），只用于说明「物理上动的是哪个文件」 */
     val apkName: String = "",
+    /** APK 里声明的应用名（`ApkForge`），列表里认包靠它 */
+    val apkLabel: String = "",
+    val apkIcon: ImageBitmap? = null,
+    val apkVersion: String? = null,
     val apkSize: Long = 0L,
     val packageName: String? = null,
 
     val targetClass: String = "",
     val launcherCandidates: List<String> = emptyList(),
-    val targetMethod: String = "onCreate",
+    /**
+     * 真正落笔的方法名。[autoTarget] 为 true 时，这是系统**替你挑的**结果，
+     * 不是用户的选择——UI 必须显示成「自动（onCreate）」而不是「onCreate」。
+     */
+    val targetMethod: String = "",
     val targetSignature: String = "(Landroid/os/Bundle;)V",
+    /** 注入点是否交给系统自动决定（默认 true，不再要求用户手选生命周期方法） */
+    val autoTarget: Boolean = true,
+    /** 注入模式：单次 / 每次进入 / 多点 / 替换方法体 */
+    val mode: InjectionMode = InjectionMode.ONCE,
 
     val classFound: Boolean = false,
     val classSuperType: String? = null,
@@ -84,6 +100,14 @@ data class ConsoleUiState(
 
     val targetPoint: LifecyclePoints.Point?
         get() = points.firstOrNull { it.name == targetMethod }
+
+    /** 「每次进入」这类模式会铺多个点，这里给出预计落点数供 UI 提前说明。 */
+    val plannedTargets: Int
+        get() = resolution?.let { r ->
+            com.xixin.apkforge.core.dex.InjectionPlanner.plan(
+                mode = mode, points = points, methods = classMethods, wanted = r.target,
+            ).targets.size
+        } ?: 1
 
     val targetStatus: LifecyclePoints.Status?
         get() = targetPoint?.let { LifecyclePoints.statusOf(it, classMethods) }
@@ -147,11 +171,21 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             // 而不是一边转圈一边说「还差：选一个 APK」。
             apkFile = picked,
             apkName = picked.name,
+            apkLabel = picked.nameWithoutExtension,
+            apkIcon = null,
+            apkVersion = null,
             apkSize = picked.length(),
+            // 换包 = 换类 = 之前的注入点结论全部作废，回到自动
+            autoTarget = true,
+            targetMethod = "",
         )
         viewModelScope.launch {
+            val app = getApplication<Application>()
             val stable = withContext(Dispatchers.IO) { runCatching { tasks.importApk(picked) } }
                 .getOrDefault(picked)
+            // 图标/应用名走 PackageManager，与 AXML 解析并行不了（都在 IO 线程串行更快：
+            // 两者都要读同一个几十 MB 的 zip，并行反而争 IO）。
+            val meta = withContext(Dispatchers.IO) { ApkMeta.read(app, stable) }
             val manifest = withContext(Dispatchers.IO) { pipeline.peekManifest(stable) }
             val launchers = manifest?.launcherActivities ?: emptyList()
             val cls = launchers.firstOrNull() ?: state.targetClass
@@ -164,6 +198,9 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                 parsing = false,
                 apkFile = stable,
                 apkName = stable.name,
+                apkLabel = meta?.displayName(stable.nameWithoutExtension) ?: stable.nameWithoutExtension,
+                apkIcon = meta?.icon,
+                apkVersion = meta?.versionName,
                 apkSize = stable.length(),
                 packageName = manifest?.packageName,
                 launcherCandidates = launchers,
@@ -213,12 +250,28 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setTargetMethod(name: String, signature: String) {
-        state = state.copy(targetMethod = name, targetSignature = signature)
+        state = state.copy(targetMethod = name, targetSignature = signature, autoTarget = false)
         recomputeResolution()
     }
 
     /** 选一个注入点：同时带出签名，避免用户看到裸方法名。 */
     fun selectPoint(p: LifecyclePoints.Point) = setTargetMethod(p.name, p.signature)
+
+    /**
+     * 把注入点交回系统自动决定。
+     *
+     * 「自动」不是一个 UI 上的摆设：它决定 [recomputeResolution] 是**自己挑**一个点，
+     * 还是**尊重**用户选的点。混在一起的话，用户选了 onResume 之后只要换个类名，
+     * 系统就会把他选的悄悄改掉。
+     */
+    fun useAutoTarget() {
+        state = state.copy(autoTarget = true)
+        recomputeResolution()
+    }
+
+    fun setMode(mode: InjectionMode) {
+        state = state.copy(mode = mode)
+    }
 
     /**
      * 换类之后，把「上一套清单里的标准注入点」纠正回来。
@@ -232,6 +285,8 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
      *  · 是用户自定的名字 → 一律保留，他明确知道自己在干什么。
      */
     private fun normalizeTargetAfterClassChange() {
+        // 自动模式下没什么可纠正的：下一次 recomputeResolution 会重新挑。
+        if (state.autoTarget) return
         val isStandard = ALL_STANDARD_NAMES.contains(state.targetMethod)
         if (!isStandard || state.points.any { it.name == state.targetMethod }) return
         val preferred = state.points.firstOrNull { it.name == "onCreate" }
@@ -252,9 +307,15 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
      * native 的 onCreate 会自动让位给 onPostCreate，并把原因放进 [ConsoleUiState.resolution]。
      */
     private fun recomputeResolution() {
-        val wanted = state.targetPoint ?: LifecyclePoints.Point(
-            state.targetMethod, state.targetSignature, "自定义方法"
-        )
+        // 自动模式：把「想要的点」定成 onCreate，让 resolve 去处理 native 降级；
+        // 类没有 onCreate 时取清单第一个，保证永远有一个合法起点。
+        val wanted = if (state.autoTarget) {
+            state.points.firstOrNull { it.name == "onCreate" } ?: state.points.first()
+        } else {
+            state.targetPoint ?: LifecyclePoints.Point(
+                state.targetMethod, state.targetSignature, "自定义方法"
+            )
+        }
         val r = LifecyclePoints.resolve(state.points, state.classMethods, wanted)
         state = state.copy(
             resolution = r,
@@ -278,8 +339,12 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             callCount = calls.size,
             callErrors = errors.messages,
             payloadDex = dex,
-            targetMethod = cfg.targetMethod,
-            targetSignature = cfg.targetSignature,
+            // 配置只决定「注入什么」（调用行 + 载荷），不决定「注到哪」——
+            // 注入点是类自己的属性，跟着包走，不该被一套配置带着跨包漂移。
+            // 上一版把 config 的 targetMethod 套进当前任务，换到别的包时会戳到
+            // 那个包里根本不存在的方法，表现为「注入成功、效果为零」。
+            mode = cfg.mode,
+            autoTarget = true,
             message = if (dex == null && cfg.dexPath != null) {
                 "配置「${cfg.name}」的 dex 文件已丢失，请到配置页重新选择"
             } else {
@@ -352,10 +417,13 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                 sourceApk = apk,
                 outputApk = tmp,
                 targetClass = snapshot.targetClass.takeIf { it.isNotBlank() },
-                targetMethod = snapshot.targetMethod.ifBlank { "onCreate" },
+                // 自动模式下传空串，交给流水线按类里的真实方法 + native 规则挑
+                targetMethod = if (snapshot.autoTarget) "" else snapshot.targetMethod,
                 targetSignature = snapshot.targetSignature,
+                mode = snapshot.mode,
                 callsText = snapshot.callsText,
                 payloadDex = snapshot.payloadDex,
+                extraAssets = snapshot.readAssets(),
             )
 
             val r = pipeline.run(input) { s ->
@@ -405,12 +473,15 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                     TaskStore.Record(
                         id = "task_${System.currentTimeMillis()}",
                         apkName = apk.name,
+                        apkLabel = snapshot.apkLabel,
                         apkPath = apk.absolutePath,
                         apkSize = apk.length(),
                         packageName = snapshot.packageName,
                         targetClass = r.resolvedClass ?: snapshot.targetClass,
                         configId = snapshot.activeConfigId,
                         configName = snapshot.activeConfig?.name ?: "自定义调用",
+                        mode = snapshot.mode.name,
+                        targetNames = r.targets.map { it.methodName },
                         targetMethod = r.resolvedMethod ?: snapshot.targetMethod,
                         targetSignature = r.resolvedSignature ?: snapshot.targetSignature,
                         outputPath = savedPath,
@@ -424,6 +495,19 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             state = state.copy(records = tasks.list())
         }
     }
+
+    /**
+     * 读出当前配置要求的额外资产（宿主包内路径 → 字节）。
+     *
+     * 读不到就**跳过并留日志**，而不是让整次注入失败：
+     * 用户可能只想换个包注入、并不在意弹窗配置，为了一个资产文件把任务打死过于粗暴。
+     */
+    private fun ConsoleUiState.readAssets(): Map<String, ByteArray> =
+        activeConfig?.assets.orEmpty().mapNotNull { (path, local) ->
+            val f = File(local)
+            if (!f.isFile) return@mapNotNull null
+            runCatching { path to f.readBytes() }.getOrNull()
+        }.toMap()
 
     private fun saveStartStep(app: Application, tmp: File) = ApkInjectPipeline.Step(
         stage = ApkInjectPipeline.Stage.SAVE,

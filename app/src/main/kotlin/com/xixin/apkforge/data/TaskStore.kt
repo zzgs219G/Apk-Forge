@@ -30,7 +30,10 @@ class TaskStore(context: Context) {
 
     data class Record(
         val id: String,
+        /** 文件名（`app-debug.apk`），物理上动了哪个文件 */
         val apkName: String,
+        /** APK 里声明的应用名。列表认包靠它 + 图标 + 包名，不靠文件名 */
+        val apkLabel: String = "",
         /** 私有副本路径；文件可能被用户清掉，用 [apkExists] 判断 */
         val apkPath: String,
         val apkSize: Long,
@@ -39,8 +42,12 @@ class TaskStore(context: Context) {
         /** 配置 id；配置被删后为 null，但 [configName] 快照仍在 */
         val configId: String? = null,
         val configName: String = "未套用配置",
-        val targetMethod: String = "onCreate",
+        val targetMethod: String = "",
         val targetSignature: String = "(Landroid/os/Bundle;)V",
+        /** 注入模式名（`InjectionMode.name`），多点模式会额外记录全部落点 */
+        val mode: String = "ONCE",
+        /** 真正被写过的所有方法名；单次模式只有一条 */
+        val targetNames: List<String> = emptyList(),
         val outputPath: String? = null,
         val ok: Boolean = false,
         val injectedCount: Int = 0,
@@ -52,6 +59,14 @@ class TaskStore(context: Context) {
         val outputFile: File? get() = outputPath?.let { File(it) }
         val outputExists: Boolean get() = outputFile?.isFile == true
         val apkSizeMb: String get() = String.format("%.1f", apkSize / 1048576.0)
+
+        /** 列表主标题：应用名优先，取不到退回文件名 */
+        val title: String get() = apkLabel.takeIf { it.isNotBlank() } ?: apkName
+
+        /** 落点摘要：`onCreate + onResume`，多点模式一眼看出铺了几个 */
+        val targetsSummary: String get() = (targetNames.ifEmpty {
+            listOfNotNull(targetMethod.takeIf { it.isNotBlank() })
+        }).joinToString(" + ")
     }
 
     fun list(): List<Record> {
@@ -116,6 +131,7 @@ class TaskStore(context: Context) {
     private fun toJson(r: Record): JSONObject = JSONObject().apply {
         put("id", r.id)
         put("apkName", r.apkName)
+        put("apkLabel", r.apkLabel)
         put("apkPath", r.apkPath)
         put("apkSize", r.apkSize)
         put("packageName", r.packageName ?: JSONObject.NULL)
@@ -124,6 +140,8 @@ class TaskStore(context: Context) {
         put("configName", r.configName)
         put("targetMethod", r.targetMethod)
         put("targetSignature", r.targetSignature)
+        put("mode", r.mode)
+        put("targetNames", JSONArray(r.targetNames))
         put("outputPath", r.outputPath ?: JSONObject.NULL)
         put("ok", r.ok)
         put("injectedCount", r.injectedCount)
@@ -134,14 +152,19 @@ class TaskStore(context: Context) {
     private fun fromJson(o: JSONObject): Record = Record(
         id = o.getString("id"),
         apkName = o.optString("apkName", "unknown.apk"),
+        apkLabel = o.optString("apkLabel", ""),
         apkPath = o.optString("apkPath", ""),
         apkSize = o.optLong("apkSize", 0L),
         packageName = if (o.isNull("packageName")) null else o.optString("packageName"),
         targetClass = o.optString("targetClass", ""),
         configId = if (o.isNull("configId")) null else o.optString("configId"),
         configName = o.optString("configName", "未套用配置"),
-        targetMethod = o.optString("targetMethod", "onCreate"),
+        targetMethod = o.optString("targetMethod", ""),
         targetSignature = o.optString("targetSignature", "(Landroid/os/Bundle;)V"),
+        mode = o.optString("mode", "ONCE"),
+        targetNames = o.optJSONArray("targetNames")?.let { arr ->
+            (0 until arr.length()).map { arr.optString(it) }.filter { it.isNotBlank() }
+        } ?: emptyList(),
         outputPath = if (o.isNull("outputPath")) null else o.optString("outputPath"),
         ok = o.optBoolean("ok", false),
         injectedCount = o.optInt("injectedCount", 0),

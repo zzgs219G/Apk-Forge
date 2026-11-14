@@ -15,6 +15,8 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Extension
+import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VerifiedUser
@@ -39,6 +41,10 @@ import com.xixin.apkforge.feature.console.ConsoleViewModel
 import com.xixin.apkforge.ui.screen.ComingSoonScreen
 import com.xixin.apkforge.ui.screen.about.AboutScreen
 import com.xixin.apkforge.ui.screen.config.ConfigScreen
+import com.xixin.apkforge.feature.batch.BatchViewModel
+import com.xixin.apkforge.feature.plugin.PluginViewModel
+import com.xixin.apkforge.ui.screen.batch.BatchScreen
+import com.xixin.apkforge.ui.screen.plugin.PluginScreen
 import com.xixin.apkforge.ui.screen.console.ConsoleScreen
 import com.xixin.apkforge.ui.screen.run.RunScreen
 import com.xixin.apkforge.ui.screen.setup.SetupScreen
@@ -60,6 +66,8 @@ enum class AppDest(
 ) {
     CONSOLE("console", "控制台", Icons.Rounded.Terminal),
     CONFIG("config", "配置", Icons.Rounded.Tune),
+    BATCH("batch", "批量", Icons.Rounded.Layers),
+    PLUGIN("plugin", "插件包", Icons.Rounded.Extension),
     SIGN("sign", "签名", Icons.Rounded.VerifiedUser),
     ABOUT("about", "关于", Icons.Rounded.Info),
 
@@ -101,6 +109,10 @@ fun AppRoot(
      * 在 NavHost 之上取，owner 就是 Activity，天然共享且能扛住旋转。
      */
     console: ConsoleViewModel = viewModel(),
+    /** 批量注入的 VM。与控制台分开：两者是不同生命周期的事，状态不该互相污染。 */
+    batch: BatchViewModel = viewModel(),
+    /** 插件包 VM：造载荷，与注入流程互不依赖。 */
+    plugin: PluginViewModel = viewModel(),
 ) {
     val nav: NavHostController = rememberNavController()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -120,6 +132,7 @@ fun AppRoot(
 
     fun openSetup() = nav.navigate(AppDest.SETUP.route) { launchSingleTop = true }
     fun openRun() = nav.navigate(AppDest.RUN.route) { launchSingleTop = true }
+    fun openBatch() = nav.navigate(AppDest.BATCH.route) { launchSingleTop = true }
 
     /**
      * 推入配置页（不入栈 top 替换）。
@@ -145,7 +158,9 @@ fun AppRoot(
                 scope.launch { drawerState.close() }
                 val dest = AppDest.of(route)
                 backStack?.destination?.route?.let { from ->
-                    if (from == AppDest.SETUP.route || from == AppDest.RUN.route) {
+                    if (from == AppDest.SETUP.route || from == AppDest.RUN.route ||
+                        from == AppDest.BATCH.route || from == AppDest.PLUGIN.route
+                    ) {
                         // 从子页去别的平级页：先回控制台，避免栈底被顶掉
                         nav.popBackStack(AppDest.CONSOLE.route, inclusive = false)
                     }
@@ -176,6 +191,19 @@ fun AppRoot(
                     onOpenDrawer = { scope.launch { drawerState.open() } },
                     onOpenSetup = ::openSetup,
                     onOpenRun = ::openRun,
+                    onOpenConfig = ::pushConfig,
+                    onOpenBatch = ::openBatch,
+                )
+            }
+            composable(AppDest.PLUGIN.route) {
+                PluginScreen(vm = plugin, onBack = ::back)
+            }
+            composable(AppDest.BATCH.route) {
+                BatchScreen(
+                    vm = batch,
+                    // 批量是从控制台推入的子页：返回回控制台，而不是回退栈里剩下的东西
+                    onBack = ::back,
+                    onOpenConfig = ::pushConfig,
                 )
             }
             composable(AppDest.SETUP.route) {
@@ -234,7 +262,7 @@ fun AppRoot(
 fun AppDrawerContent(current: AppDest, onMenuClick: (String) -> Unit) {
     // 子页归到父入口，菜单高亮才不会掉
     val highlighted = when (current) {
-        AppDest.SETUP, AppDest.RUN -> AppDest.CONSOLE
+        AppDest.SETUP, AppDest.RUN, AppDest.BATCH -> AppDest.CONSOLE
         else -> current
     }
     Box(Modifier.fillMaxHeight()) {

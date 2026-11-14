@@ -25,6 +25,8 @@ object ApkRepackager {
         val totalEntries: Int,
         val replacedDex: String,
         val addedDex: String?,
+        /** 本次写入（或替换）的非 dex 条目，如 `assets/apkforge_dialog.json` */
+        val addedAssets: List<String> = emptyList(),
         val originalSize: Long,
         val outputSize: Long,
     )
@@ -39,6 +41,17 @@ object ApkRepackager {
         targetDexName: String,
         newDexBytes: ByteArray,
         payloadDexBytes: ByteArray?,
+        /**
+         * 额外要写入的条目：path → 内容。
+         *
+         * 用途是「载荷的配置文件」——例如本地弹窗载荷会读宿主的
+         * `assets/apkforge_dialog.json`。这类文件不是 dex，但必须跟 dex 一起进包，
+         * 否则载荷跑起来找不到配置。
+         *
+         * 同名条目会被**替换**而不是重复写入：zip 里出现两个同路径条目，
+         * Android 的 AssetManager 取到哪个是未定义的。
+         */
+        extraEntries: Map<String, ByteArray> = emptyMap(),
         /** 每写一个条目回调一次（index 从 1 开始，total 含目录条目）。用于进度与日志。 */
         onEntry: ((index: Int, total: Int, name: String) -> Unit)? = null,
     ): Stats {
@@ -47,10 +60,14 @@ object ApkRepackager {
         var addedName: String? = null
         // ZipFile.entries() 是 Enumeration，先物化成 List 才能同时拿到总数与逐个遍历
         val allEntries = zip.entries().toList()
-        val total = allEntries.size + if (payloadDexBytes != null) 1 else 0
+        val existingNames = allEntries.map { it.name }.toSet()
+        // 已存在的同名条目不额外增加条目数（它是替换，不是新增）
+        val newExtras = extraEntries.filterKeys { !existingNames.contains(it) }
+        // ⚠️ 括号不能省：`a + if (c) 1 else 0 + n` 会被解析成 `a + if (c) 1 else (0 + n)`
+        val total = allEntries.size + (if (payloadDexBytes != null) 1 else 0) + newExtras.size
+        val written = mutableListOf<String>()
 
         try {
-            val existingNames = allEntries.map { it.name }.toSet()
             // 找下一个空闲的 classesN.dex 名字
             if (payloadDexBytes != null) {
                 var n = 2
@@ -71,10 +88,13 @@ object ApkRepackager {
                         continue
                     }
 
-                    val bytes: ByteArray = if (entry.name == targetDexName) {
-                        newDexBytes
-                    } else {
-                        zip.getInputStream(entry).use { it.readBytesCompat() }
+                    val bytes: ByteArray = when {
+                        entry.name == targetDexName -> newDexBytes
+                        extraEntries.containsKey(entry.name) -> {
+                            written += entry.name
+                            extraEntries.getValue(entry.name)
+                        }
+                        else -> zip.getInputStream(entry).use { it.readBytesCompat() }
                     }
 
                     writeEntry(out, entry, bytes)
@@ -82,7 +102,19 @@ object ApkRepackager {
                     onEntry?.invoke(entryCount, total, entry.name)
                 }
 
-                // 2) 追加 payload dex
+                // 2) 追加原本不存在的额外条目（如 assets/ 下的配置）
+                newExtras.forEach { (path, data) ->
+                    val e = ZipEntry(path).apply {
+                        method = ZipEntry.DEFLATED
+                        time = 0L
+                    }
+                    writeEntry(out, e, data)
+                    written += path
+                    entryCount++
+                    onEntry?.invoke(entryCount, total, path)
+                }
+
+                // 3) 追加 payload dex
                 if (payloadDexBytes != null && addedName != null) {
                     val e = ZipEntry(addedName).apply {
                         method = ZipEntry.DEFLATED
@@ -101,6 +133,7 @@ object ApkRepackager {
             totalEntries = entryCount,
             replacedDex = targetDexName,
             addedDex = addedName,
+            addedAssets = written,
             originalSize = sourceApk.length(),
             outputSize = outputApk.length(),
         )

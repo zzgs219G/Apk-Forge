@@ -2,7 +2,8 @@
 
 本地 APK dex 注入工具（Android 端，无需电脑）。
 
-选一个 APK，把 smali 调用插进指定 Activity 的生命周期方法，附带的 payload dex 一起打进包，产物写到 `Download/ApkForge/`。
+选一个 APK，把 smali 调用插进它的生命周期方法，附带的 payload dex 一起打进包，产物写到 `Download/ApkForge/`。
+支持单包注入、目录批量注入，以及自己捏一份弹窗载荷（改文案 → 导出 dex + 配置）。
 
 ---
 
@@ -12,8 +13,8 @@
 选 APK ──▶ 解析 Manifest 的 LAUNCHER ──▶ 定位目标类所在 dex
                                             │
                                             ▼
-                              在 onCreate 等方法的**第一条指令之前**
-                              插入你粘的 invoke 行
+                              在生命周期方法的**第一条指令之前**
+                              插入你粘的 invoke 行（注入点默认自动）
                                             │
                                             ▼
                         方法不存在？→ 新建（父类调用 + 注入 + return）
@@ -33,17 +34,46 @@
 **native 的 onCreate** 会挡路（加固壳 / `NativeActivity` 常见）。这时自动按
 `onPostCreate` → `onStart` → `onResume` → `attachBaseContext` 的顺序换点，并把原因写在界面上。
 
+### 四种注入模式
+
+| 模式 | 载体 | 用于 |
+|---|---|---|
+| 单次注入 | 启动切入点 | 弹一次公告、初始化钩子 |
+| 每次进入 | `onStart` + `onResume` | 每次回到页面都要检查（更新提示、校验） |
+| 多点全覆盖 | 所有可插的生命周期点 | 调试打点，要看完整时序 |
+| 替换方法体 | 单点，丢弃原方法体 | 打桩/劫持（风险最高，UI 会警告） |
+
+模式与落点的判定收在 `InjectionPlanner`（纯 JVM），
+不会出现「注入成功但行为为零」那种无声失败。
+
 ---
 
 ## 快速开始
 
 1. 装 `app-debug.apk`
-2. 控制台 → **选 APK 开始**（自动读出 LAUNCHER Activity 与它已有的方法）
+2. 控制台 → **选 APK 开始**（自动读出应用名 / 图标 / 包名 / LAUNCHER Activity）
 3. 选一套配置；没有就点「新建」，或先点「先填一套示例跑通流程」
-4. 确认注入点（下拉里标着「已有 / 将创建 / native 不可插」）→ **开始注入**
-5. 跑完看进度、日志与产物，卡上有「安装 / MT 定位 / 分享」
+4. 确认注入点（默认「自动」，需要接管时点「指定」）→ 底部 **开始注入**
+5. 跑完看结果卡：改了什么、产物在哪、安装 / MT 定位 / 分享
 
 任务会留一条记录在控制台：下次想换套配置再注入，点记录就行，不用重新找包。
+
+**批量注入**：右上角菜单 → 批量注入 → 选一个目录（含子目录，最多 50 个）→ 挑一套配置 → 开始。
+串行跑，每项带自己的状态与失败原因。
+
+**插件包**：侧边栏 → 插件包 → 改标题/正文/按钮 → 导出。
+产出 `Download/ApkForge/apkforge-plugin.zip`（dex + 配置 + 调用行），并顺手建一条配置。
+
+### 自己构建弹窗载荷
+
+```bash
+export ANDROID_HOME=/path/to/android-sdk      # 需要 build-tools（d8）与任一 platform
+sh payload/dialog/build.sh
+# 产出 payload/dialog/out/{PayloadDialog.dex, ApkForgeDialog.json, call.txt, apkforge-plugin.zip}
+```
+
+载荷只依赖 `android.app.AlertDialog` / `org.json`，**没有网络代码**；
+配置读宿主自己的 `assets/apkforge_dialog.json`，改文案不用重编 dex。
 
 ---
 
@@ -53,6 +83,9 @@
 |---|---|---|---|
 | `com.android.tools.smali:smali-dexlib2` | 3.0.10 | dex 读写 | 随机访问、lazy 解析、无文本往返损失 |
 | `junit` | 4.13.2 | 本地端到端验证 | 注入核心不含 Android API，可在 JVM 上跑真实 APK |
+
+弹窗载荷（`payload/`）用 `javac + d8` 直接构建，**零第三方依赖**——它会被塞进别人的 APK，
+体积和依赖面都必须克制。
 
 **评估后未采用**：
 
@@ -116,6 +149,7 @@ sh .cnb/scripts/ensure-sdk.sh
 | `docs/流程文档.md` | 注入流水线每一步的实现细节与数据流 |
 | `docs/项目介绍.md` | 架构、模块职责、设计取舍 |
 | `docs/踩坑记录.md` | 每个真实踩到的坑：现象、根因、修法、教训 |
+| `payload/dialog/` | 弹窗载荷源码与构建脚本（独立于 App 构建） |
 | `docs/变更历史.md` | 版本演进 |
 | `AGENTS.md` | AI 维护者规范（改动前必读） |
 
@@ -130,6 +164,8 @@ sh .cnb/scripts/ensure-sdk.sh
 | v 寄存器有风险 | 运行时可能异常 | 注入点在方法开头，v 族尚未赋值；用 `p0`/`p1` 才安全 |
 | 无幂等保护 | 重复注入会在方法头叠加调用 | UI 靠 `running` 状态挡重复点击，是 UI 保证不是数据保证 |
 | 只支持 arm64-v8a | 32 位设备装不上 | `abiFilters` 收窄，换 ABI 改 `app/build.gradle.kts` |
+| 批量注入串行 | 50 个包要等较久 | 并行只会更快 OOM，串行还能保日志因果顺序 |
+| 弹窗载荷无网络能力 | 只能显示本地配置的公告 | 刻意为之：注入进别人 App 的东西不该有联网轮询的行为 |
 
 ---
 

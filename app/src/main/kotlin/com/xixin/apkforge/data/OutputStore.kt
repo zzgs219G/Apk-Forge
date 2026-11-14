@@ -92,6 +92,56 @@ object OutputStore {
         }
     }
 
+    /**
+     * 写任意字节到 `Download/ApkForge/`。
+     *
+     * 与 [saveApk] 共用同一套落盘逻辑（MediaStore + 真实路径反推），
+     * 区别只在 MIME：zip 用 `application/zip`，否则系统可能把它当成 APK 去装。
+     * 单独抽一个函数而不是让调用方自己拼，是为了「产物路径用户可见」这条铁律
+     * 只有一处实现——多一套写法就多一个「某些机型看不到文件」的坑。
+     */
+    fun saveFile(context: Context, bytes: ByteArray, targetName: String, mime: String): Saved {
+        val tmp = File(context.cacheDir, "export_${System.currentTimeMillis()}_$targetName")
+        tmp.writeBytes(bytes)
+        try {
+            val name = uniqueName(context, targetName)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Downloads.DISPLAY_NAME, name)
+                    put(MediaStore.Downloads.MIME_TYPE, mime)
+                    put(
+                        MediaStore.Downloads.RELATIVE_PATH,
+                        "${Environment.DIRECTORY_DOWNLOADS}/$SUB_DIR"
+                    )
+                    put(MediaStore.Downloads.IS_PENDING, 1)
+                }
+                val uri = context.contentResolver
+                    .insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: throw IllegalStateException("MediaStore 插入失败")
+                context.contentResolver.openOutputStream(uri)?.use { out ->
+                    tmp.inputStream().use { it.copyTo(out) }
+                } ?: throw IllegalStateException("无法写入 Download")
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                context.contentResolver.update(uri, values, null, null)
+                val file = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "$SUB_DIR/$name"
+                )
+                return Saved(file, uri)
+            }
+            val dir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                SUB_DIR
+            ).apply { mkdirs() }
+            val f = File(dir, name)
+            tmp.inputStream().use { i -> f.outputStream().use { o -> i.copyTo(o) } }
+            return Saved(f, null)
+        } finally {
+            tmp.delete()
+        }
+    }
+
     private fun uniqueName(context: Context, name: String): String {
         val base = name.substringBeforeLast('.', name)
         val ext = name.substringAfterLast('.', "apk")
