@@ -10,7 +10,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-import com.xixin.apkforge.core.dex.LifecyclePoints
+import com.xixin.apkforge.core.dex.InjectionMode
 import com.xixin.apkforge.core.dex.SamplePayload
 import com.xixin.apkforge.core.dex.SmaliCallParser
 import com.xixin.apkforge.data.ConfigStore
@@ -28,8 +28,8 @@ data class ConfigEditorState(
     val editingId: String? = null,
     val name: String = "",
     val calls: String = "",
-    val targetMethod: String = "onCreate",
-    val targetSignature: String = "(Landroid/os/Bundle;)V",
+    /** 注入模式。注入点（哪个类的哪个方法）不在这里配——那是包自己的属性 */
+    val mode: InjectionMode = InjectionMode.ONCE,
     val dexPath: String? = null,
 
     val callErrors: List<String> = emptyList(),
@@ -61,8 +61,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
             editingId = null,
             name = "",
             calls = "",
-            targetMethod = "onCreate",
-            targetSignature = "(Landroid/os/Bundle;)V",
+            mode = InjectionMode.ONCE,
             dexPath = null,
             dirty = false,
         )
@@ -73,8 +72,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
             editingId = cfg.id,
             name = cfg.name,
             calls = cfg.calls,
-            targetMethod = cfg.targetMethod,
-            targetSignature = cfg.targetSignature,
+            mode = cfg.mode,
             dexPath = cfg.dexPath?.takeIf { File(it).isFile },
             callErrors = emptyList(),
             callCount = cfg.callCount,
@@ -101,20 +99,8 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    fun setMethod(v: String) {
-        state = state.copy(targetMethod = v, dirty = true)
-    }
-
-    fun setSignature(v: String) {
-        state = state.copy(targetSignature = v, dirty = true)
-    }
-
-    fun setLifecyclePoint(p: LifecyclePoints.Point) {
-        state = state.copy(
-            targetMethod = p.name,
-            targetSignature = p.signature,
-            dirty = true,
-        )
+    fun setMode(m: InjectionMode) {
+        state = state.copy(mode = m, dirty = true)
     }
 
     fun setDex(file: File?) {
@@ -152,8 +138,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                     id = state.editingId,
                     name = state.name,
                     calls = state.calls,
-                    targetMethod = state.targetMethod,
-                    targetSignature = state.targetSignature,
+                    mode = state.mode,
                     dexSource = state.dexFile?.takeIf { it.isFile },
                     // 编辑已有配置时，用户没重新选 dex → 保留原 dex
                     keepExistingDexIfNull = true,
@@ -196,8 +181,7 @@ class ConfigViewModel(app: Application) : AndroidViewModel(app) {
                     id = null,
                     name = "${cfg.name} 副本",
                     calls = cfg.calls,
-                    targetMethod = cfg.targetMethod,
-                    targetSignature = cfg.targetSignature,
+                    mode = cfg.mode,
                     dexSource = cfg.dexFile,
                 )
             }

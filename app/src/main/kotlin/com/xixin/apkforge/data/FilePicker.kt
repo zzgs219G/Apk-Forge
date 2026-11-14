@@ -80,6 +80,22 @@ object FilePicker {
 
     fun pickDexIntent(context: Context): Intent = buildIntent(context)
 
+    /**
+     * 选一个**目录**（批量注入用）。
+     *
+     * 必须是 `ACTION_OPEN_DOCUMENT_TREE` 而不是 `ACTION_GET_CONTENT`：
+     * 后者拿不到子项枚举能力，无法把目录里的 apk 列出来。
+     * 也刻意不限定 MT 包名——MT 对这个 action 的支持不稳定，
+     * 系统「文件」选择器是所有机型都有的那条路。
+     */
+    fun pickFolderIntent(): Intent =
+        Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).apply {
+            addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+            )
+        }
+
     fun openWith(context: Context, file: File, mime: String) {
         try {
             val uri = androidx.core.content.FileProvider.getUriForFile(

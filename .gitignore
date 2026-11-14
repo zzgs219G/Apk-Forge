@@ -21,9 +21,16 @@ Thumbs.db
 *.ap_
 *.dex
 !app/src/main/assets/sample/*.dex
+# 弹窗载荷的 dex 是**构建产物但必须入库**：App 运行时要从 assets 读它，
+# 而 CI 里不保证有 build-tools（d8）。改了 payload/ 源码要重新跑 build.sh 并提交这个文件。
+!app/src/main/assets/plugin/*.dex
 
 # 示例 payload 的中间产物（源码在 tools/sample-payload/src，dex 在 assets）
 tools/sample-payload/build/
+
+# 弹窗载荷的中间产物与输出（源码在 payload/dialog/src，dex 已随 assets 入库）
+payload/dialog/build/
+payload/dialog/out/
 
 # 日志
 *.log

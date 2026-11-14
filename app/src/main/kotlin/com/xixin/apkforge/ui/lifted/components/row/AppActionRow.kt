@@ -66,13 +66,11 @@ fun AppActionRow(
     modifier: Modifier = Modifier
 ) {
     when (variant) {
+        // M3 新版把 headlineContent 挪成了尾随的 content lambda（旧重载已废弃）。
+        // 这里跟随新签名，避免每次编译都刷一条 warning。
         AppActionRowVariant.ListItemRow -> ListItem(
-            headlineContent = {
-                Text(
-                    text = title,
-                    color = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
-                )
-            },
+            overlineContent = null,
+            supportingContent = null,
             leadingContent = {
                 Icon(
                     imageVector = icon,
@@ -83,7 +81,12 @@ fun AppActionRow(
             modifier = modifier
                 .clip(RoundedCornerShape(16.dp))
                 .clickable(onClick = onClick)
-        )
+        ) {
+            Text(
+                text = title,
+                color = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface
+            )
+        }
 
         AppActionRowVariant.PressBounceRow -> Row(
             modifier = modifier

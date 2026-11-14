@@ -8,6 +8,8 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -20,13 +22,17 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowForward
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.InstallMobile
@@ -34,26 +40,23 @@ import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material.icons.automirrored.rounded.ArrowForward
-import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.runtime.derivedStateOf
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -83,6 +86,9 @@ import com.xixin.apkforge.ui.lifted.AppConstants
 import com.xixin.apkforge.ui.lifted.Gap
 import com.xixin.apkforge.ui.lifted.HGap
 import com.xixin.apkforge.ui.lifted.page.AppTopBar
+import com.xixin.apkforge.ui.lifted.components.ApkIcon
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -90,13 +96,22 @@ import java.util.Locale
 /**
  * 控制台首页。
  *
- * 【为什么是「一张锚点卡 + 一列记录」】旧版把配置、选包、类名、方法、日志、结果全塞进一屏，
- * 每块都在争夺注意力，用户的第一眼问题是「我该点哪」。
- * 现在的信息层级只有两级：
- *   1. **锚点卡**（唯一主操作）——没选包时是「选 APK 开始」，选完变成任务摘要 + 「开始注入」；
- *   2. **任务记录**（历史，可复用）——列表里每条都记着包、配置、注入点、产物，
- *      点一下就带着上次的包和配置回到配置页，换套配置再跑。
- * 别的东西（配置管理、签名、关于）都在侧边栏，不在这里抢位置。
+ * 【这一版动了什么，为什么动】
+ *
+ * 1. **主按钮从卡片顶部挪到底部固定栏。** 上一版「开始注入」长在锚点卡里，
+ *    卡在上面、手机又大，单手拇指够它是别扭的。现在它是一条贴底的常驻栏：
+ *    位置永远不变、永远够得着，滚多远都在。
+ *
+ * 2. **悬浮按钮不再「选完包才出现」。** 上一版的条件是 `apkFile != null`，
+ *    等于在用户最需要「选包」入口的时候把它藏起来。现在它跟底栏是同一动作的替身：
+ *    底栏永远在，悬浮按钮只在列表滚过头卡时补位，且内容与底栏一致。
+ *
+ * 3. **右上角收纳功能。** 之前右上角只有一个状态点，白白浪费。
+ *    现在是一个菜单：新建配置 / 批量注入 / 清空记录——都是「跟当前任务无关但常用」的动作，
+ *    放这里比塞进侧边栏少一次跳转。
+ *
+ * 4. **卡片认包靠图标 + 应用名 + 包名 + 文件名。** 上一个版本只有文件名，
+ *    而 `app-1.apk` / `app-2.apk` 对用户毫无区别。
  */
 @Composable
 fun ConsoleScreen(
@@ -104,10 +119,13 @@ fun ConsoleScreen(
     onOpenDrawer: () -> Unit = {},
     onOpenSetup: () -> Unit = {},
     onOpenRun: () -> Unit = {},
+    onOpenConfig: () -> Unit = {},
+    onOpenBatch: () -> Unit = {},
 ) {
     val state = vm.state
     val context = LocalContext.current
     val listState = rememberLazyListState()
+    var menu by remember { mutableStateOf(false) }
 
     val apkPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -127,7 +145,7 @@ fun ConsoleScreen(
 
     fun pickApk() = apkPicker.launch(FilePicker.pickApkIntent(context))
 
-    /** 锚点卡上那颗按钮的行为随状态走，全 App 只有这一处主入口。 */
+    /** 底部栏那颗按钮的行为随状态走，全 App 只有这一处主入口。 */
     fun primary() {
         when {
             state.apkFile == null -> pickApk()
@@ -137,8 +155,6 @@ fun ConsoleScreen(
         }
     }
 
-    // 锚点卡滚出屏幕后，右下角浮出同一动作。
-    // 长列表（记录多时）里没有这个，用户滑到底部想开跑还得往回找。
     val anchorGone by remember {
         derivedStateOf { listState.firstVisibleItemIndex > 0 }
     }
@@ -148,7 +164,32 @@ fun ConsoleScreen(
             AppTopBar(
                 title = "控制台",
                 onMenuClick = onOpenDrawer,
-                actions = { StatusDot(state.status) },
+                actions = {
+                    Box {
+                        IconButton(onClick = { menu = true }) {
+                            Icon(
+                                Icons.Rounded.MoreVert,
+                                contentDescription = "更多",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            MenuRow("新建配置", Icons.Rounded.Add) {
+                                menu = false; onOpenConfig()
+                            }
+                            MenuRow("批量注入", Icons.Rounded.FolderOpen) {
+                                menu = false; onOpenBatch()
+                            }
+                            MenuRow("换一个 APK", Icons.Rounded.Refresh) {
+                                menu = false; pickApk()
+                            }
+                            HorizontalDivider()
+                            MenuRow("清空记录", Icons.Rounded.Delete, danger = true) {
+                                menu = false; vm.clearRecords()
+                            }
+                        }
+                    }
+                },
             )
 
             LazyColumn(
@@ -158,7 +199,8 @@ fun ConsoleScreen(
                     start = AppConstants.SCREEN_EDGE_PADDING,
                     end = AppConstants.SCREEN_EDGE_PADDING,
                     top = 4.dp,
-                    bottom = 96.dp,
+                    // 底部留出固定操作栏 + 悬浮按钮的空间，否则最后一条记录会被压住
+                    bottom = 152.dp,
                 ),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
@@ -166,7 +208,6 @@ fun ConsoleScreen(
                     AnchorCard(
                         state = state,
                         onPickApk = ::pickApk,
-                        onPrimary = ::primary,
                         onOpenRun = onOpenRun,
                     )
                 }
@@ -192,7 +233,7 @@ fun ConsoleScreen(
                             )
                             Spacer(Modifier.weight(1f))
                             TextButton(onClick = vm::clearRecords) {
-                                Text("清空记录", style = MaterialTheme.typography.labelMedium)
+                                Text("清空", style = MaterialTheme.typography.labelMedium)
                             }
                         }
                     }
@@ -231,30 +272,33 @@ fun ConsoleScreen(
                             onDelete = { vm.deleteRecord(record.id) },
                         )
                     }
-
-                    item {
-                        Text(
-                            "点卡片 = 带着这个包和配置再来一次；换配置不用重新找文件。",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(top = 2.dp, start = 4.dp),
-                        )
-                    }
                 } else {
                     item { HintBlock() }
                 }
             }
         }
 
-        // 悬浮锚点：卡片滚走后的替身
-        androidx.compose.animation.AnimatedVisibility(
-            visible = anchorGone && state.apkFile != null,
-            enter = fadeIn() + androidx.compose.animation.scaleIn(initialScale = 0.8f),
-            exit = fadeOut() + androidx.compose.animation.scaleOut(targetScale = 0.8f),
+        // ── 贴底主操作栏 ──
+        // 位置固定、拇指可达。这是全 App 唯一的主操作，滚到哪都在。
+        BottomActionBar(
+            state = state,
+            onPrimary = ::primary,
+            onOpenSetup = onOpenSetup,
+            onOpenRun = onOpenRun,
+        )
+
+        // 悬浮代替：只有列表滚过头卡、底栏被内容「顶」出视野感时才浮出，
+        // 内容与底栏完全一致（同一个 action），不会让用户学两套。
+        AnimatedVisibility(
+            // 有消息条时不浮出：两者都在底部，同时出现必然互相压住
+            visible = anchorGone && state.message == null,
+            enter = fadeIn() + scaleIn(initialScale = 0.85f),
+            exit = fadeOut() + scaleOut(targetScale = 0.85f),
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .navigationBarsPadding()
-                .padding(end = AppConstants.SCREEN_EDGE_PADDING, bottom = 20.dp),
+                // 底栏实测约 118dp 高（52dp 主按钮 + 次行 + 上下内边距），浮在这里刚好不撞
+                .padding(end = AppConstants.SCREEN_EDGE_PADDING, bottom = 128.dp),
         ) {
             ExtendedFloatingActionButton(
                 onClick = ::primary,
@@ -268,28 +312,19 @@ fun ConsoleScreen(
                         contentDescription = null,
                     )
                 },
-                text = {
-                    Text(
-                        when {
-                            state.running -> "看进度"
-                            state.canRun -> "开始注入"
-                            else -> "继续配置"
-                        },
-                        style = MaterialTheme.typography.labelLarge,
-                    )
-                },
+                text = { Text(primaryLabel(state), style = MaterialTheme.typography.labelLarge) },
             )
         }
 
-        // 消息条浮在底部：不占布局、不挡主操作，点「知道了」才走
-        androidx.compose.animation.AnimatedVisibility(
+        // 消息条：浮在底栏之上，不挡主操作
+        AnimatedVisibility(
             visible = state.message != null,
             enter = fadeIn() + expandVertically(),
             exit = fadeOut() + shrinkVertically(),
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .navigationBarsPadding()
-                .padding(bottom = 84.dp, start = 16.dp, end = 16.dp),
+                .padding(bottom = 128.dp, start = 16.dp, end = 16.dp),
         ) {
             Surface(
                 shape = RoundedCornerShape(16.dp),
@@ -315,133 +350,283 @@ fun ConsoleScreen(
     }
 }
 
-// ══════════════════════ 锚点卡 ══════════════════════
+private fun primaryLabel(state: ConsoleUiState): String = when {
+    state.running -> "看进度"
+    state.apkFile == null -> "选 APK 开始"
+    state.canRun -> "开始注入"
+    else -> "继续配置"
+}
+
+// ══════════════════════ 贴底主操作 ══════════════════════
 
 /**
- * 全屏唯一的主操作。它的形态随状态变化，但**永远只有一颗按钮**：
- *   · 没选包 → 「选 APK 开始」
- *   · 选了包 → 「开始注入」（缺配置时点它进配置页）
+ * 贴底主操作栏。
+ *
+ * 【为什么不用悬浮按钮当主入口】悬浮按钮是「次要动作的补位」语义——
+ * 用户在 Material 语汇里看到 FAB，不会预期它是唯一入口。而这里只有一条主路径，
+ * 它得有一个稳定的、贴在拇指区的位置。
  */
 @Composable
-private fun AnchorCard(
+private fun BottomActionBar(
     state: ConsoleUiState,
-    onPickApk: () -> Unit,
     onPrimary: () -> Unit,
+    onOpenSetup: () -> Unit,
     onOpenRun: () -> Unit,
 ) {
-    val hasApk = state.apkFile != null
-    val cta = when {
-        !hasApk -> "选 APK 开始"
-        state.running -> "看执行进度"
-        state.canRun -> "开始注入"
-        else -> "继续配置"
-    }
-
-    Card(
-        shape = RoundedCornerShape(28.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(20.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        if (hasApk) "当前任务" else "本地 dex 注入",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
-                    )
-                    Gap(6.dp)
-                    Text(
-                        text = if (hasApk) state.apkName else "选一个 APK，\n把调用塞进它的生命周期",
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer,
-                        maxLines = if (hasApk) 2 else 3,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Gap(6.dp)
-                    Text(
-                        text = if (hasApk) {
-                            listOfNotNull(
-                                state.packageName,
-                                "${state.apkSize / 1048576} MB",
-                            ).joinToString(" · ")
-                        } else {
-                            "选包 → 选配置 → 注入。产物进 Download/ApkForge。"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f),
-                    )
-                }
-                HGap(12.dp)
-                ForgeGlyph(
-                    modifier = Modifier.size(if (hasApk) 56.dp else 72.dp),
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                    active = state.status == ConsoleStatus.RUNNING,
-                )
-            }
-
-            if (hasApk) {
-                Gap(16.dp)
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    TonalPill(
-                        state.activeConfig?.name ?: "未套配置",
-                        warn = state.activeConfig == null,
-                    )
-                    TonalPill(state.targetMethod, mono = true)
-                    if (state.targetStatus == LifecyclePoints.Status.MISSING) {
-                        TonalPill("将创建")
-                    }
-                }
-            }
-
-            Gap(18.dp)
+    Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = AppConstants.SCREEN_EDGE_PADDING, vertical = 10.dp)
+        ) {
             Button(
                 onClick = onPrimary,
                 shape = RoundedCornerShape(16.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    contentColor = MaterialTheme.colorScheme.primaryContainer,
-                ),
+                colors = ButtonDefaults.buttonColors(),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(52.dp),
             ) {
                 Icon(
-                    if (hasApk) Icons.Rounded.PlayArrow else Icons.Rounded.FolderOpen,
+                    when {
+                        state.running -> Icons.AutoMirrored.Rounded.ArrowForward
+                        state.apkFile == null -> Icons.Rounded.FolderOpen
+                        else -> Icons.Rounded.PlayArrow
+                    },
                     contentDescription = null,
                     modifier = Modifier.size(20.dp),
                 )
                 HGap(8.dp)
-                Text(cta, style = MaterialTheme.typography.titleMedium)
+                Text(primaryLabel(state), style = MaterialTheme.typography.titleMedium)
             }
 
-            if (hasApk) {
-                // 「上次的结果」是次要动作：不抢主按钮，但必须在卡片里够得着。
-                // 否则用户跑完回去，只能靠翻记录列表找回来。
-                val result = state.result
+            // 次行动作：只在有包时出现，避免空状态下出现两个都点不动的按钮
+            if (state.apkFile != null) {
+                Gap(6.dp)
                 Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically,
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    if (result != null) {
-                        TextButton(onClick = onOpenRun) {
+                    TextButton(onClick = onOpenSetup, modifier = Modifier.weight(1f)) {
+                        Text(
+                            "调整配置",
+                            style = MaterialTheme.typography.labelMedium,
+                            maxLines = 1,
+                        )
+                    }
+                    if (state.result != null) {
+                        TextButton(onClick = onOpenRun, modifier = Modifier.weight(1f)) {
                             Text(
-                                (if (result.ok) "上次成功" else "上次失败") + " · 看结果",
+                                if (state.result.ok) "上次成功" else "上次失败",
                                 style = MaterialTheme.typography.labelMedium,
+                                maxLines = 1,
                             )
                         }
                     }
-                    TextButton(onClick = onPickApk) {
-                        Text("换一个 APK", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+        }
+    }
+}
+
+// ══════════════════════ 锚点卡 ══════════════════════
+
+/**
+ * 当前任务卡。
+ *
+ * 【标签的含义】卡上两枚标签是**这条任务的身份**：
+ *   ① 配置（注入什么：调用行 + payload dex）
+ *   ② 签名（产物怎么签）——目前是「未签名」占位，
+ *      因为它迟早要占这个位置，提前留好位置比将来挤进来更省事。
+ * 注入点不是标签：它由系统自动算出来，把它摆在同等位置会让用户以为需要关心。
+ */
+@Composable
+private fun AnchorCard(
+    state: ConsoleUiState,
+    onPickApk: () -> Unit,
+    onOpenRun: () -> Unit,
+) {
+    val hasApk = state.apkFile != null
+
+    Card(
+        shape = RoundedCornerShape(28.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(18.dp)) {
+            if (!hasApk) {
+                EmptyAnchor(onPickApk = onPickApk)
+                return@Column
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                ApkIcon(
+                    icon = state.apkIcon,
+                    fallback = state.apkLabel.ifBlank { state.apkName },
+                    size = 56.dp,
+                )
+                HGap(14.dp)
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "当前任务",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Gap(2.dp)
+                    Text(
+                        state.apkLabel.ifBlank { state.apkName },
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Gap(2.dp)
+                    Text(
+                        state.packageName ?: "包名未知",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontFamily = FontFamily.Monospace
+                        ),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                StatusDot(state.status)
+            }
+
+            Gap(10.dp)
+            Text(
+                // 文件名单独一行：它是「物理上动的是哪个文件」，与手机里那个 APK 对得上号
+                listOfNotNull(
+                    state.apkName,
+                    state.apkVersion?.let { "v$it" },
+                    "${state.apkSize / 1048576} MB",
+                ).joinToString(" · "),
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontFamily = FontFamily.Monospace
+                ),
+                color = MaterialTheme.colorScheme.outline,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+
+            Gap(14.dp)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Tag(
+                    text = state.activeConfig?.name ?: "未套配置",
+                    warn = state.activeConfig == null,
+                )
+                Tag(text = "未签名", muted = true)
+            }
+
+            Gap(10.dp)
+            Text(
+                buildString {
+                    append(state.mode.label)
+                    append(" → ")
+                    append(if (state.autoTarget) "自动 · " else "")
+                    append(state.targetMethod.ifBlank { "待解析" })
+                    if (state.plannedTargets > 1) append(" 等 ${state.plannedTargets} 个方法")
+                    if (state.targetStatus == LifecyclePoints.Status.MISSING) append("（将创建）")
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            if (state.result != null) {
+                Gap(8.dp)
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (state.result.ok) {
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
+                    } else {
+                        MaterialTheme.colorScheme.error.copy(alpha = 0.12f)
+                    },
+                ) {
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            if (state.result.ok) "上次注入成功" else "上次注入失败",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (state.result.ok) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.error,
+                            modifier = Modifier.weight(1f),
+                        )
+                        TextButton(onClick = onOpenRun) {
+                            Text("看结果", style = MaterialTheme.typography.labelMedium)
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun EmptyAnchor(onPickApk: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        ForgeGlyph(
+            modifier = Modifier.size(64.dp),
+            color = MaterialTheme.colorScheme.primary,
+        )
+        HGap(16.dp)
+        Column(Modifier.weight(1f)) {
+            Text(
+                "本地 dex 注入",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Gap(4.dp)
+            Text(
+                "选一个 APK，\n把调用塞进它的生命周期",
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Gap(6.dp)
+            Text(
+                "选包 → 选配置 → 注入。产物进 Download/ApkForge。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+    Gap(14.dp)
+    Surface(
+        onClick = onPickApk,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Rounded.FolderOpen,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp),
+            )
+            HGap(10.dp)
+            Text(
+                "从 MT / 文件管理器选 APK",
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
+            Icon(
+                Icons.AutoMirrored.Rounded.ArrowForward,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
         }
     }
 }
@@ -480,7 +665,6 @@ fun ForgeGlyph(
             color = color.copy(alpha = 0.18f * alpha),
             style = Stroke(width = w * 0.05f),
         )
-        // 箭头：从左上插向中心偏右下
         val arrow = Path().apply {
             moveTo(cx - r * 0.62f, cy - r * 0.62f)
             lineTo(cx + r * 0.18f, cy + r * 0.18f)
@@ -522,35 +706,27 @@ private fun StatusDot(status: ConsoleStatus) {
                 .background(color)
         )
         HGap(6.dp)
-        Text(
-            status.label,
-            style = MaterialTheme.typography.labelMedium,
-            color = color,
-        )
+        Text(status.label, style = MaterialTheme.typography.labelMedium, color = color)
     }
 }
 
 @Composable
-private fun TonalPill(text: String, warn: Boolean = false, mono: Boolean = false) {
+private fun Tag(text: String, warn: Boolean = false, muted: Boolean = false) {
     Surface(
         shape = RoundedCornerShape(100.dp),
-        color = if (warn) {
-            MaterialTheme.colorScheme.error.copy(alpha = 0.16f)
-        } else {
-            MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.10f)
+        color = when {
+            warn -> MaterialTheme.colorScheme.error.copy(alpha = 0.14f)
+            muted -> MaterialTheme.colorScheme.surfaceContainerHighest
+            else -> MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
         },
     ) {
         Text(
             text,
-            style = if (mono) {
-                MaterialTheme.typography.labelMedium.copy(fontFamily = FontFamily.Monospace)
-            } else {
-                MaterialTheme.typography.labelMedium
-            },
-            color = if (warn) {
-                MaterialTheme.colorScheme.error
-            } else {
-                MaterialTheme.colorScheme.onPrimaryContainer
+            style = MaterialTheme.typography.labelMedium,
+            color = when {
+                warn -> MaterialTheme.colorScheme.error
+                muted -> MaterialTheme.colorScheme.onSurfaceVariant
+                else -> MaterialTheme.colorScheme.primary
             },
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
             maxLines = 1,
@@ -564,8 +740,11 @@ private fun TonalPill(text: String, warn: Boolean = false, mono: Boolean = false
 /**
  * 一条任务记录。
  *
- * 职责：「防止重复选 APK」。所以卡面第一行必须是**包名**，第二行是**用了哪套配置**，
- * 第三行才是时间/大小这类元信息。产物缺失时明说，而不是等用户点了安装才报错。
+ * 认包靠三样东西，缺一样就会「认不出是哪个包」：
+ *   ① 图标（最快，一眼分辨）
+ *   ② 应用名（人话）
+ *   ③ 包名（唯一，且和系统设置里对得上）
+ * 文件名退到最后一行，只在需要「去文件管理器找它」时才用得上。
  */
 @Composable
 private fun RecordCard(
@@ -577,10 +756,24 @@ private fun RecordCard(
     onDelete: () -> Unit,
 ) {
     var menu by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    // 图标要开整个 zip 读资源，**不能**在组合期同步做：
+    // 列表滚动时每帧调一次会把主线程钉住，表现是「滑到记录区就掉帧」。
+    // 用 produceState 在 IO 线程解，先给 null（首字母兜底）再替换。
+    val icon by androidx.compose.runtime.produceState<androidx.compose.ui.graphics.ImageBitmap?>(
+        initialValue = null,
+        key1 = record.apkPath,
+    ) {
+        value = withContext(Dispatchers.IO) {
+            record.apkFile?.takeIf { it.isFile }?.let {
+                com.xixin.apkforge.data.ApkMeta.read(context, it)?.icon
+            }
+        }
+    }
 
     Card(
         onClick = onReuse,
-        shape = RoundedCornerShape(22.dp),
+        shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerLow
         ),
@@ -588,66 +781,61 @@ private fun RecordCard(
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
-            Modifier.padding(start = 14.dp, end = 6.dp, top = 14.dp, bottom = 14.dp),
+            Modifier.padding(start = 14.dp, end = 6.dp, top = 12.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // 失败也要有痕迹：左侧竖条位置固定，扫列表时能一眼分辨成功与失败
-            Box(
-                Modifier
-                    .size(width = 4.dp, height = 38.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(
-                        if (record.ok) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.error
-                    )
-            )
+            ApkIcon(icon = icon, fallback = record.title, size = 40.dp)
             HGap(12.dp)
 
             Column(Modifier.weight(1f)) {
-                Text(
-                    record.apkName,
-                    style = MaterialTheme.typography.bodyLarge.copy(
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Medium,
-                    ),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Gap(3.dp)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        record.configName,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.primary,
+                        record.title,
+                        style = MaterialTheme.typography.bodyLarge,
+                        fontWeight = FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false),
                     )
                     HGap(6.dp)
+                    val mark = if (record.ok) "成功" else "失败"
                     Text(
-                        "· ${record.targetMethod}",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontFamily = FontFamily.Monospace
-                        ),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
+                        mark,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (record.ok) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.error,
                     )
                 }
-                Gap(3.dp)
+                Gap(2.dp)
+                Text(
+                    record.packageName ?: record.apkName,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Gap(2.dp)
                 Text(
                     listOfNotNull(
+                        record.configName,
+                        record.targetsSummary.ifBlank { null },
                         timeAgo(record.at),
-                        "${record.apkSizeMb} MB",
-                        if (record.outputExists) "产物在" else "产物已删",
                     ).joinToString(" · "),
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (record.outputExists) {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    } else {
-                        MaterialTheme.colorScheme.error.copy(alpha = 0.8f)
-                    },
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
+                if (!record.outputExists) {
+                    Gap(2.dp)
+                    Text(
+                        "产物已删除",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
+                    )
+                }
             }
 
             Box {

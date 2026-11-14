@@ -9,7 +9,8 @@
 ```
 本地 APK dex 注入工具（Android 端）
 依赖只有 smali-dexlib2 3.0.10 + JUnit
-23 项单元测试基于真实 APK，可离线跑
+36 项单元测试基于真实 APK，可离线跑
+4 种注入模式、批量注入、可自造弹窗载荷（payload/）
 无重签名、不处理加固包、只支持 arm64-v8a
 ```
 
@@ -24,20 +25,26 @@ com.xixin.apkforge
 │   ├── dex/SmaliCallParser      smali invoke 行 → 结构化
 │   ├── dex/ClassInspector       探测类方法/父类
 │   ├── dex/LifecyclePoints      注入点清单 + native 降级判定（★ 纯逻辑，可单测）
-│   ├── dex/DexCallInjector      dexlib2 插指令 / 建方法
+│   ├── dex/InjectionMode        注入模式 + 落点规划器（★ 纯逻辑，可单测）
+│   ├── dex/DexCallInjector      dexlib2 插指令 / 建方法 / 替换方法体
 │   ├── dex/SamplePayload        示例载荷常量（调用行 + asset 路径）
-│   ├── apk/ApkRepackager        zip 重打包（onEntry 回调供进度用）
+│   ├── apk/ApkRepackager        zip 重打包（替换 dex、追加 payload 与 assets）
 │   └── apk/ApkInjectPipeline    流水线编排（Stage 权重 + Step 坐标）
 
 ├── data/                        持久化与平台 IO（需要 Context）
-│   ├── ConfigStore              JSON 配置存储（调用行 + payload dex）
+│   ├── ConfigStore              JSON 配置存储（调用行 + 载荷 + 模式 + 资产）
 │   ├── TaskStore                JSON 任务记录 + APK 私有副本
-│   ├── OutputStore              MediaStore 写 Download
-│   └── FilePicker               MT 优先的文件选择
+│   ├── OutputStore              MediaStore 写 Download（APK / zip 都走它）
+│   ├── ApkMeta                  PackageManager 读应用名/图标/包名
+│   ├── ApkFolderScanner         目录树递归扫 .apk（批量注入用）
+│   ├── PluginPack               弹窗载荷三件套：表单 ↔ JSONC ↔ zip
+│   └── FilePicker               MT 优先的文件/目录选择
 
 ├── feature/
 │   ├── console/ConsoleViewModel  控制台唯一 VM：选包 → 配置 → 执行 → 记录
-│   └── config/ConfigViewModel    配置页增删改查（与执行流程解耦）
+│   ├── config/ConfigViewModel    配置页增删改查（与执行流程解耦）
+│   ├── batch/BatchViewModel      批量队列（与控制台生命周期不同，故分开）
+│   └── plugin/PluginViewModel    插件包：造载荷、导出 zip、建配置
 
 └── ui/
     ├── AppRoot                  侧边栏 + NavHost（★ 在此持有共享 VM）
@@ -48,9 +55,11 @@ com.xixin.apkforge
     │   ├── color/               M3 色槽映射
     │   └── m3e/                 M3E 语义动画 + 波浪进度
     ├── anim/                    六边形注入动画 + SVG path 解析
-    ├── screen/console/          控制台（锚点卡 + 任务记录 + 悬浮锚点）
-    ├── screen/setup/            注入配置（配置 / 类名 / 方法 / 载荷）
-    ├── screen/run/              运行（进度条 + 日志终端 + 完成动画 + 结果）
+    ├── screen/console/          控制台（当前任务卡 + 记录 + 贴底主操作栏）
+    ├── screen/setup/            注入配置（配置 / 类名 / 注入点 / 模式 / 调用清单）
+    ├── screen/run/              运行（单行实时日志 + 结果卡）
+    ├── screen/batch/            批量注入（目录 → 队列）
+    ├── screen/plugin/           插件包（改弹窗内容 → 导出 dex + 配置）
     ├── screen/config/           配置管理
     ├── screen/about/            关于
     ├── screen/ComingSoonScreen  未实现入口的占位（如签名）
@@ -86,11 +95,19 @@ ui → feature → data → core
 
 ```
 app/src/test/kotlin/com/xixin/apkforge/
-├── core/apk/InjectEndToEndTest   6 例  含替代点补 super、重打包回调完整性
+├── core/apk/InjectEndToEndTest   8 例  含替代点补 super、替换方法体、额外资产、回调完整性
 ├── core/dex/ClassInspectorTest   4 例
 ├── core/dex/LifecyclePointsTest  11 例 native 降级 / 体系错配 / 进度单调 / 签名可解析
+├── core/dex/InjectionModeTest    7 例  落点规划：不扩点 / 不重复 / 排除 native / 跨体系不串
+├── core/dex/PluginPayloadTest    4 例  调用行 ↔ 载荷 dex 契约、资产路径、JSONC 去注释
 ├── core/dex/SamplePayloadTest    2 例
 └── support/TestIo                测试专用 IO 封装
+
+payload/dialog/                   弹窗载荷源码（Java，零依赖）
+├── src/                          PayloadDialog.java
+├── ApkForgeDialog.json           默认配置模板
+├── build.sh                      javac + d8 → out/PayloadDialog.dex + plugin zip
+└── out/                          构建产物（dex / json / call.txt / zip）
 ```
 
 
@@ -140,7 +157,26 @@ app/src/test/kotlin/com/xixin/apkforge/
 
 两套机制混用不会崩溃，只会「多点几下才回不去」（坑 20），靠点测试覆盖不全。
 
-### 1.7 产物路径必须用户可见
+### 1.7 注入模式与落点判定只许有一处实现
+
+`InjectionPlanner`（`core/dex/InjectionMode.kt`）是唯一决定「注哪几个方法」的地方。
+
+- 各模式不得在 UI 或 VM 里自己拼 `DexCallInjector.inject()` 调用序列；
+- `ONCE` 必须沿用 `LifecyclePoints.resolve()` 的结论，不许为了「模式需要」重算一遍；
+- 任何新模式都要在 `InjectionModeTest` 里钉住：不跨体系取点、不碰 native。
+
+理由：分散实现的错法全都指向同一个症状——**注入「成功」但行为为零**，
+日志全绿、产物正常。这类失败没有报错，只能靠单测提前拦住。
+
+### 1.8 日志与可复制文本不许用省略号吞内容
+
+`maxLines = 1 + Ellipsis` 只允许用在「截掉的部分是冗余」的地方（如重复的包名前缀）。
+日志落点、错误尾句、产物路径、调用行**一律换行，不许截断**，并且必须有复制入口。
+
+理由：这些内容的尾部就是唯一标识（方法名、签名、文件名）。截断后剩下的部分
+既不能给人读，也不能贴给 AI 定位问题——那不是整齐，是把答案删了。
+
+### 1.9 产物路径必须用户可见
 
 禁止写 `getExternalFilesDir`（Android 11+ 文件管理器看不到）。一律走 `OutputStore` → `Download/ApkForge/`。
 

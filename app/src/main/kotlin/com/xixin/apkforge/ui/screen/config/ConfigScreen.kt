@@ -32,13 +32,13 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -52,10 +52,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.xixin.apkforge.core.dex.LifecyclePoints
+import com.xixin.apkforge.core.dex.InjectionMode
 import com.xixin.apkforge.data.ConfigStore
 import com.xixin.apkforge.data.FilePicker
 import com.xixin.apkforge.feature.config.ConfigEditorState
@@ -174,8 +175,7 @@ fun ConfigScreen(
                     state = state,
                     onName = vm::setName,
                     onCalls = vm::setCalls,
-                    onPoint = vm::setLifecyclePoint,
-                    onMethod = vm::setMethod,
+                    onMode = vm::setMode,
                     onPickDex = { dexPicker.launch(FilePicker.pickDexIntent(context)) },
                     onClearDex = { vm.setDex(null) },
                     onSample = vm::loadSampleDex,
@@ -312,7 +312,7 @@ private fun ConfigCardItem(
             Gap(8.dp)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 InfoPill("${cfg.callCount} 条")
-                InfoPill(cfg.targetMethod)
+                InfoPill(cfg.mode.label)
                 InfoPill(
                     if (cfg.hasDex) "dex ${cfg.dexSizeKb}KB" else "无 dex",
                     warn = !cfg.hasDex,
@@ -347,8 +347,7 @@ private fun ConfigEditor(
     state: ConfigEditorState,
     onName: (String) -> Unit,
     onCalls: (String) -> Unit,
-    onPoint: (LifecyclePoints.Point) -> Unit,
-    onMethod: (String) -> Unit,
+    onMode: (InjectionMode) -> Unit,
     onPickDex: () -> Unit,
     onClearDex: () -> Unit,
     onSample: () -> Unit,
@@ -410,42 +409,21 @@ private fun ConfigEditor(
         }
 
         item {
-            EditorCard("注入到") {
-                val isStandard = LifecyclePoints.ACTIVITY.any { it.name == state.targetMethod }
+            EditorCard("注入模式") {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    LifecyclePoints.ACTIVITY.chunked(3).forEach { row ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            row.forEach { p ->
-                                FilterChip(
-                                    selected = p.name == state.targetMethod,
-                                    onClick = { onPoint(p) },
-                                    label = {
-                                        Text(
-                                            p.name,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            fontFamily = FontFamily.Monospace,
-                                        )
-                                    },
-                                )
-                            }
-                        }
+                    InjectionMode.entries.forEach { m ->
+                        ModeRow(
+                            mode = m,
+                            selected = m == state.mode,
+                            onSelect = { onMode(m) },
+                        )
                     }
                 }
-                if (!isStandard) {
-                    Gap(8.dp)
-                    ToolSingleLineInput(
-                        value = state.targetMethod,
-                        onValueChange = onMethod,
-                        label = "自定义方法名",
-                        placeholder = "方法名",
-                    )
-                }
-                Gap(6.dp)
+                Gap(8.dp)
                 Text(
-                    "签名 ${state.targetSignature}",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontFamily = FontFamily.Monospace
-                    ),
+                    "配置只决定「注入什么」。注到哪个类的哪个方法由包自己决定，" +
+                        "默认自动挑，不在这里选——同一个包换套配置不该改变注入点。",
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -576,4 +554,44 @@ private fun ConfirmDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+/**
+ * 注入模式的一行。
+ *
+ * 用「卡片行」而不是 FilterChip：模式带一句后果说明，芯片放不下第二行文字，
+ * 用户只能靠点一下才知道自己选了什么——那等于把设计文档塞进试错流程。
+ */
+@Composable
+private fun ModeRow(mode: InjectionMode, selected: Boolean, onSelect: () -> Unit) {
+    Surface(
+        onClick = onSelect,
+        shape = RoundedCornerShape(14.dp),
+        color = if (selected) {
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHighest
+        },
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            RadioButton(selected = selected, onClick = onSelect)
+            Column(Modifier.weight(1f)) {
+                Text(
+                    mode.label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    mode.hint,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
 }

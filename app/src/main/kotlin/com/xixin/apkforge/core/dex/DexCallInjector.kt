@@ -44,6 +44,21 @@ object DexCallInjector {
         val methodName: String,
         val methodSignature: String = "(Landroid/os/Bundle;)V",
         val calls: List<SmaliCallParser.Call>,
+        /**
+         * 清空原方法体，只留父类调用与注入调用（`InjectionMode.REPLACE_BODY`）。
+         *
+         * 父类调用**不能**一起清：生命周期方法不调 super 会让宿主状态机断裂，
+         * 「替换方法体」要的是「原逻辑不执行」，不是「把宿主搞崩」。
+         */
+        val replaceBody: Boolean = false,
+    )
+
+    /** 单个落点的注入结果，供多目标注入时逐条回报。 */
+    data class TargetResult(
+        val methodName: String,
+        val signature: String,
+        val createdMethod: Boolean,
+        val injectedCount: Int,
     )
 
     sealed interface Outcome {
@@ -189,18 +204,33 @@ object DexCallInjector {
 
         body += injectedInsns
 
-        if (!created) {
-            existing!!.implementation!!.instructions.forEach { body += it }
-        } else {
-            // 新建方法的返回值：非 void 时给个 0/null 兜底，避免验证器拒绝
+        if (created || spec.replaceBody) {
+            // 两种「不留原指令」的情形：
+            //  · created：方法本来不存在，只有父类调用 + 注入 + return；
+            //  · replaceBody：用户要打桩/劫持，原逻辑必须不执行。
+            // 两种情况都必须自己补 return：替换方法体时原方法体整段被丢弃，
+            // 连它自带的 return 也不在了，不补的话方法末尾没有返回指令，
+            // 校验器直接判 dex 非法（`missing return instruction`）。
             body += defaultReturnFor(returnType)
+            if (spec.replaceBody && returnType != "V") {
+                // 非 void 的替换体拿不到原逻辑的返回值，只能用 0/null 兜底。
+                // 这属于「用户明确要求打桩」的代价，必须报出来而不是悄悄发生。
+                warnings += "替换方法体：${spec.methodName} 返回 $returnType，" +
+                    "原返回值已丢失，现返回 0/null"
+            }
+        } else {
+            // 已有方法原样保留原有指令
+            existing!!.implementation!!.instructions.forEach { body += it }
         }
 
+        // replaceBody 时 try/catch 表与调试信息必须一起清：指令被丢掉了，
+        // 留着旧 try 区间会指向不存在的偏移，dexlib2 写出后校验器直接拒绝。
+        val keepOriginalMetadata = !created && !spec.replaceBody
         val newImpl = ImmutableMethodImplementation(
             registerCount,
             body,
-            if (created) null else existing!!.implementation!!.tryBlocks,
-            if (created) null else existing!!.implementation!!.debugItems,
+            if (keepOriginalMetadata) existing!!.implementation!!.tryBlocks else null,
+            if (keepOriginalMetadata) existing!!.implementation!!.debugItems else null,
         )
 
         val accessFlags = if (created) ACCESS_PUBLIC else existing!!.accessFlags

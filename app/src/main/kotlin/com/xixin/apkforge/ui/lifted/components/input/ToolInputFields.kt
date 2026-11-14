@@ -10,9 +10,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 
 // =====================================================================
 // 1. 标准化大文本输入框（起始单行高，随内容自动长高，上限 maxHeight；右上角悬浮粘贴/清空）
@@ -37,7 +38,18 @@ fun ToolInputField(
      */
     maxHeight: Dp = 180.dp
 ) {
-    val clipboardManager = LocalClipboardManager.current
+    // LocalClipboardManager 已废弃；新入口是 suspend 的 setClipEntry，
+    // 这里只要「读文本」，用协程把 getClipEntry 拉回来即可。
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    val paste: () -> Unit = {
+        scope.launch {
+            clipboard.getClipEntry()?.clipData?.takeIf { it.itemCount > 0 }
+                ?.getItemAt(0)?.coerceToText(null)?.toString()?.let { text ->
+                    if (text.isNotEmpty()) onValueChange(text.replace("\n", "").replace("\r", ""))
+                }
+        }
+    }
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
@@ -58,8 +70,12 @@ fun ToolInputField(
         trailingIcon = {
             if (value.isEmpty()) {
                 IconButton(onClick = {
-                    val pasteText = clipboardManager.getText()?.text
-                    if (!pasteText.isNullOrEmpty()) onValueChange(pasteText)
+                    scope.launch {
+                        clipboard.getClipEntry()?.clipData?.takeIf { it.itemCount > 0 }
+                            ?.getItemAt(0)?.coerceToText(null)?.toString()?.let { text ->
+                                if (text.isNotEmpty()) onValueChange(text)
+                            }
+                    }
                 }) {
                     Icon(
                         Icons.Rounded.ContentPaste,
@@ -107,7 +123,18 @@ fun ToolSingleLineInput(
     /** autoGrow = true 时的最大高度（超过后内部滚动）。默认 null = 不设上限 */
     maxHeight: Dp? = null
 ) {
-    val clipboardManager = LocalClipboardManager.current
+    // LocalClipboardManager 已废弃；新入口是 suspend 的 setClipEntry，
+    // 这里只要「读文本」，用协程把 getClipEntry 拉回来即可。
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    val paste: () -> Unit = {
+        scope.launch {
+            clipboard.getClipEntry()?.clipData?.takeIf { it.itemCount > 0 }
+                ?.getItemAt(0)?.coerceToText(null)?.toString()?.let { text ->
+                    if (text.isNotEmpty()) onValueChange(text.replace("\n", "").replace("\r", ""))
+                }
+        }
+    }
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
@@ -130,12 +157,7 @@ fun ToolSingleLineInput(
         ),
         trailingIcon = trailingIcon ?: {
             if (value.isEmpty()) {
-                IconButton(onClick = {
-                    val pasteText = clipboardManager.getText()?.text
-                    if (!pasteText.isNullOrEmpty()) {
-                        onValueChange(pasteText.replace("\n", "").replace("\r", ""))
-                    }
-                }) {
+                IconButton(onClick = paste) {
                     Icon(Icons.Rounded.ContentPaste, "粘贴", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                 }
             } else {
