@@ -1,3 +1,13 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Theme.ComposeEmptyActivity" parent="android:Theme.Material.Light.NoActionBar" />
+    <!--
+      深色主题是设计的一部分，不是偏好：
+      二进制工具的视觉语言（终端、代码块、仪表盘读数）建立在深色底上。
+      父主题必须用 Dark，否则启动瞬间会闪一下浅色底，观感断裂。
+    -->
+    <style name="Theme.ComposeEmptyActivity" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/forge_bg</item>
+        <item name="android:statusBarColor">@color/forge_bg</item>
+        <item name="android:navigationBarColor">@color/forge_bg</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
 </resources>

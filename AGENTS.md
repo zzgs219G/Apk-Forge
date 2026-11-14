@@ -9,17 +9,84 @@
 ```
 本地 APK dex 注入工具（Android 端）
 依赖只有 smali-dexlib2 3.0.10 + JUnit
-10 项单元测试基于真实 APK，python/junit 均可离线跑
+10 项单元测试基于真实 APK，可离线跑
 无重签名、不处理加固包、只支持 arm64-v8a
 ```
 
-核心目录：
+### 目录树（分层有严格语义，不要随意跨层）
 
-| 路径 | 职责 | 可否依赖 Android API |
+```
+com.xixin.apkforge
+├── MainActivity.kt              只挂 AppRoot
+│
+├── core/                        ★ 纯 JVM，禁止依赖 Android API
+│   ├── axml/AxmlManifest        二进制 AXML 解析
+│   ├── dex/SmaliCallParser      smali invoke 行 → 结构化
+│   ├── dex/ClassInspector       探测类方法/父类
+│   ├── dex/DexCallInjector      dexlib2 插指令 / 建方法
+│   ├── dex/SamplePayload        示例载荷常量（调用行 + asset 路径）
+│   ├── apk/ApkRepackager        zip 重打包
+│   └── apk/ApkInjectPipeline    流水线编排
+│
+├── data/                        持久化与平台 IO（需要 Context）
+│   ├── ConfigStore              JSON 配置存储
+│   ├── OutputStore              MediaStore 写 Download
+│   └── FilePicker               MT 优先的文件选择
+│
+├── feature/                     ViewModel，一功能一目录
+│   ├── inject/InjectViewModel
+│   └── config/ConfigViewModel
+│
+└── ui/
+    ├── AppRoot                  侧边栏 + NavHost
+    ├── design/                  ★ 设计系统，唯一视觉来源
+    │   ├── ForgeTheme           色板 / 字阶 / 形状
+    │   ├── Motion               弹簧 / 缓动 / 时长 / 尺寸 token
+    │   ├── PressBounce          按压缩放修饰符
+    │   ├── ForgeComponents      顶栏 / 按钮 / 徽标 / 卡片 / 读数 …
+    │   ├── ForgeInputs          单行 / 多行输入
+    │   └── ForgeSelectors       弹出面板 / chip / 文件行
+    ├── anim/                    注入动画（2 版并存）+ SVG path 解析
+    ├── screen/inject/           注入页
+    ├── screen/config/           配置页
+    ├── screen/about/            关于页
+    └── theme/Theme.kt           只做 Forge → MaterialTheme 的映射
+```
+
+### 依赖方向（单向，禁止反向）
+
+```
+ui → feature → data → core
+ │
+ └─→ ui/design（所有 ui 都可依赖）
+```
+
+**违反即打回**：
+- `core/` 里出现 `android.*` import
+- `data/` 反向依赖 `feature/` 或 `ui/`
+- `feature/` 里出现 Composable
+- 页面直接 new 一个 `ConfigStore`（必须走 ViewModel）
+
+### 分层职责
+
+| 层 | 允许 | 禁止 |
 |---|---|---|
-| `inject/AxmlManifest` `SmaliCallParser` `ClassInspector` `DexCallInjector` `ApkRepackager` `ApkInjectPipeline` | 核心逻辑 | **不可以**（必须能在 JVM 上测） |
-| `inject/OutputStore` `FilePicker` `ConfigStore` | 需要 Context | 可以 |
-| `ui/` | Compose | 可以 |
+| `core/` | Kotlin 标准库、dexlib2、`java.util.zip` | `android.*`、Context、Log |
+| `data/` | `core/`、Android IO/存储 API | 反向依赖上层、写 UI 逻辑 |
+| `feature/` | `core/` `data/`、`ViewModel`、协程 | Composable、直接持有 Activity |
+| `ui/design/` | Compose 基础、`Forge` 自身 | 业务类型（不得 import `core/feature`） |
+| `ui/screen/` | 全部下层 + `ui/design` `ui/anim` | 手写色值/字号/弹簧字面量 |
+
+### 测试目录镜像主代码
+
+```
+app/src/test/kotlin/com/xixin/apkforge/
+├── core/apk/InjectEndToEndTest
+├── core/dex/ClassInspectorTest
+├── core/dex/SamplePayloadTest
+└── support/TestIo              测试专用 IO 封装
+```
+
 
 ---
 
