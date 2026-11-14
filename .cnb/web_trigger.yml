@@ -1,41 +1,49 @@
-# 网页触发按钮的表单定义（CNB 平台约定目录）
+# 网页触发按钮配置（CNB 平台约定：.cnb/web_trigger.yml）
 #
-# ⚠️ 每个按钮的 event 必须指向不同的事件名。
-# 若所有按钮都用 `event: web_trigger`，点任何一个都会把
-# `web_trigger` 下的**全部** pipeline 跑一遍 —— 点「云端打包」会连单元测试一起跑。
+# ⚠️ 本文件不支持 include 和 imports 语法（平台限制）。
+# ⚠️ 顶层键必须是 branch，值是数组；用 reg 正则匹配分支名，未填则匹配全部。
+# ⚠️ 按钮的 event 必须与 .cnb.yml 里配置的事件一一对应，否则点下去没反应。
 #
-# 对应关系：
-#   「云端打包 APK」→ web_trigger       （pipeline-package.yml）
-#   「单元测试」     → web_trigger_test （pipeline-test.yml）
+# 对应关系（本文件 event → .cnb.yml 里 main 分支下的同名事件）：
+#   「云端打包 APK」→ web_trigger_package  （pipeline-package.yml）
+#   「单元测试」     → web_trigger_test     （pipeline-test.yml）
 
-web_trigger:
-- name: 云端打包 APK
-  type: manual
-  description: 构建 APK 并作为附件上传（默认测试版，可选正式版）
-  event: web_trigger
-  inputs:
-  - name: build_type
-    description: 打包类型
-    type: choice
-    values:
-    - "测试版(debug)"
-    - "正式版(release)"
-    - "全部(both)"
-    default: "测试版(debug)"
-  - name: version_code
-    description: 版本号，选填。整数(如 110)或点分(如 1.1.0)；留空用 version.properties
-    type: string
-    default: ""
-  - name: log_level
-    description: 日志模式
-    type: choice
-    values:
-    - "快速模式"
-    - "详细模式"
-    default: "快速模式"
+branch:
+  # 只匹配 main 分支的详情页（代码-分支详情页才显示自定义按钮）
+  - reg: ^main$
+    buttons:
+      - name: 云端打包 APK
+        description: 构建 APK 并作为附件上传
+        event: web_trigger_package
+        groupName: 构建
+        inputs:
+          build_type:
+            name: 打包类型
+            type: select
+            default: 测试版(debug)
+            options:
+              - name: 测试版(debug)
+                value: 测试版(debug)
+              - name: 正式版(release)
+                value: 正式版(release)
+              - name: 全部(both)
+                value: 全部(both)
+          version_code:
+            name: 版本号
+            description: 选填。整数(如 110)或点分(如 1.1.0)；留空用 version.properties
+            type: input
+            placeholder: "110 或 1.1.0"
+          log_level:
+            name: 日志模式
+            type: select
+            default: 快速模式
+            options:
+              - name: 快速模式
+                value: 快速模式
+              - name: 详细模式
+                value: 详细模式
 
-- name: 单元测试
-  type: manual
-  description: 跑全部纯 JVM 单测（真实 APK 端到端注入验证）
-  event: web_trigger_test
-  inputs: []
+      - name: 单元测试
+        description: 跑全部纯 JVM 单测（真实 APK 端到端注入验证）
+        event: web_trigger_test
+        groupName: 构建

@@ -18,8 +18,8 @@
 #   dev.api_trigger   API / 本地触发（cnb CLI、OpenAPI StartBuild）
 #   v*.tag_push       推送 v* 标签自动打正式版（版本号从标签解析）
 
-dev:
-  web_trigger:
+main:
+  web_trigger_package:
   - name: 云端打包 APK
     docker:
       image: mobiledevops/android-sdk-image:34.0.1

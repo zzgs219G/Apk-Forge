@@ -19,7 +19,7 @@
 # testOptions 里配了 2048MB —— 端到端测试要加载 37MB 的真实 APK 并重写 dex，
 # 默认 512MB 会 OOM。这里再显式给一次，双保险。
 
-dev:
+main:
   # ⚠️ 事件名必须与按钮一一对应，不能共用
   # 所有按钮若都用 `event: web_trigger`，点任何一个按钮都会把
   # `web_trigger` 事件下的**全部** pipeline 跑一遍。

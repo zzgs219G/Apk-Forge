@@ -13,7 +13,7 @@
 # 只在这两个路径变更时触发。改 README / 文档 / CI 配置不触发 ——
 # 那些改动不可能引发编译错误，触发就是白烧额度。
 
-dev:
+main:
   pull_request:
   - name: PR 编译门禁
     docker:
