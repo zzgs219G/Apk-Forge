@@ -12,7 +12,6 @@ pluginManagement {
         mavenCentral()
     }
 }
-
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
@@ -25,5 +24,17 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "ApkForge"
+
+// ── 本地 JDK 21 定位（仅本机生效，CI 不干扰）──────────────────
+// 为什么不在 gradle.properties 写 org.gradle.java.home：
+// 那个文件只能写常量路径，而 Termux 的 JDK 路径
+// /data/data/com.termux/files/usr/lib/jvm/java-21-openjdk
+// 在 CNB / GitHub Actions 容器里不存在，Gradle 会直接以
+// "Specified Java home ... does not exist" 失败。
+// 这里按「目录真的存在才设置」，本机与 CI 各自走对的分支。
+val localJdkHome = "/data/data/com.termux/files/usr/lib/jvm/java-21-openjdk"
+if (file(localJdkHome).isDirectory) {
+    System.setProperty("org.gradle.java.home", localJdkHome)
+}
 
 include(":app")
