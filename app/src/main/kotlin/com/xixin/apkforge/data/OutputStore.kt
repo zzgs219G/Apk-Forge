@@ -127,6 +127,51 @@ object OutputStore {
         false
     }
 
+    /**
+     * 按**真实路径**安装/分享/定位历史产物。
+     *
+     * 【为什么不能复用 [Saved] 的 URI】MediaStore 的 content URI 只在本次进程有效，
+     * 任务记录里存的是文件路径（重启后仍要能用）。所以这里统一走 FileProvider，
+     * 而 `file_paths.xml` 里为此声明了 `Download/ApkForge/` 这一条 external-path。
+     */
+    fun uriFor(context: Context, file: File): Uri? = try {
+        androidx.core.content.FileProvider.getUriForFile(
+            context, "${context.packageName}.fileprovider", file
+        )
+    } catch (_: Exception) {
+        null
+    }
+
+    fun installPath(context: Context, file: File): Boolean = try {
+        val uri = uriFor(context, file) ?: return false
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, MIME_APK)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+        )
+        true
+    } catch (_: Exception) {
+        false
+    }
+
+    fun sharePath(context: Context, file: File): Boolean = try {
+        val uri = uriFor(context, file) ?: return false
+        context.startActivity(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND).apply {
+                    type = MIME_APK
+                    putExtra(Intent.EXTRA_STREAM, uri)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                },
+                "分享注入产物"
+            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+        true
+    } catch (_: Exception) {
+        false
+    }
+
     fun shareFile(context: Context, saved: Saved): Boolean = try {
         val uri = saved.uri ?: androidx.core.content.FileProvider.getUriForFile(
             context, "${context.packageName}.fileprovider", saved.file

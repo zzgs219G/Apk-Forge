@@ -21,6 +21,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
@@ -72,6 +74,11 @@ import com.xixin.apkforge.ui.lifted.components.input.ToolInputField
 fun ConfigScreen(
     vm: ConfigViewModel = viewModel(),
     onOpenDrawer: () -> Unit = {},
+    /** 从控制台/注入配置页推入时给返回箭头；点它走 popBackStack，回到来处。 */
+    onBack: (() -> Unit)? = null,
+    onBackToConsole: () -> Unit = {},
+    /** 保存成功后通知外部刷新（注入配置页的配置下拉要立刻看得到新配置）。 */
+    onSaved: () -> Unit = {},
 ) {
     val state = vm.state
     val context = LocalContext.current
@@ -99,7 +106,7 @@ fun ConfigScreen(
             title = "重命名",
             initial = cfg.name,
             onDismiss = { renaming = null },
-            onConfirm = { vm.rename(cfg.id, it); renaming = null },
+            onConfirm = { vm.rename(cfg.id, it); renaming = null; onSaved() },
         )
     }
     deleting?.let { cfg ->
@@ -108,7 +115,7 @@ fun ConfigScreen(
             body = "「${cfg.name}」及其绑定的 dex 会被删除，不可恢复。",
             confirmText = "删除",
             onDismiss = { deleting = null },
-            onConfirm = { vm.delete(cfg.id); deleting = null },
+            onConfirm = { vm.delete(cfg.id); deleting = null; onSaved() },
         )
     }
     if (confirmingDiscard) {
@@ -124,9 +131,14 @@ fun ConfigScreen(
     Column(Modifier.fillMaxSize()) {
         AppTopBar(
             title = if (showEditor) "编辑配置" else "配置",
+            leadingIcon = if (showEditor || onBack == null) Icons.Filled.Menu
+            else Icons.AutoMirrored.Rounded.ArrowBack,
+            leadingLabel = if (showEditor || onBack == null) "打开侧边栏" else "返回",
             onMenuClick = {
                 if (showEditor) {
                     if (state.dirty) confirmingDiscard = true else showEditor = false
+                } else if (onBack != null) {
+                    onBack()
                 } else {
                     onOpenDrawer()
                 }
@@ -134,7 +146,12 @@ fun ConfigScreen(
             actions = {
                 if (showEditor) {
                     Button(
-                        onClick = { vm.save { showEditor = false } },
+                        onClick = {
+                            vm.save {
+                                showEditor = false
+                                onSaved()
+                            }
+                        },
                         enabled = state.canSave,
                         shape = RoundedCornerShape(12.dp),
                     ) { Text("保存") }
@@ -164,7 +181,10 @@ fun ConfigScreen(
                     onSample = vm::loadSampleDex,
                 )
             } else if (state.configs.isEmpty()) {
-                EmptyConfigs(onCreate = { vm.startNew(); showEditor = true })
+                EmptyConfigs(
+                    onCreate = { vm.startNew(); showEditor = true },
+                    onBackToConsole = onBackToConsole,
+                )
             } else {
                 LazyColumn(
                     contentPadding = PaddingValues(
@@ -191,7 +211,7 @@ fun ConfigScreen(
 }
 
 @Composable
-private fun EmptyConfigs(onCreate: () -> Unit) {
+private fun EmptyConfigs(onCreate: () -> Unit, onBackToConsole: () -> Unit) {
     Column(
         Modifier
             .fillMaxSize()
@@ -209,6 +229,8 @@ private fun EmptyConfigs(onCreate: () -> Unit) {
         )
         Gap(16.dp)
         Button(onClick = onCreate) { Text("新建配置") }
+        Gap(4.dp)
+        TextButton(onClick = onBackToConsole) { Text("回控制台") }
     }
 }
 

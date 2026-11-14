@@ -19,23 +19,31 @@
                         方法不存在？→ 新建（父类调用 + 注入 + return）
                                             │
                                             ▼
-                       payload dex 作为 classesN.dex 追加 ──▶ 重打包
+                       payload dex 作为 classesN.dex 追加 ──▶ 重打包（逐条目上报进度）
                                             │
                                             ▼
                               Download/ApkForge/xxx_injected.apk
+                                            │
+                                            ▼
+                              任务记录：包 + 配置 + 注入点 + 产物
 ```
 
 **不做**的事情：不重签名、不解码 Manifest 成文本、不处理加固包。
+
+**native 的 onCreate** 会挡路（加固壳 / `NativeActivity` 常见）。这时自动按
+`onPostCreate` → `onStart` → `onResume` → `attachBaseContext` 的顺序换点，并把原因写在界面上。
 
 ---
 
 ## 快速开始
 
 1. 装 `app-debug.apk`
-2. 侧边栏 → **配置** → 新建
-3. 点「载入示例」→ 得到一套可用的配置（`DemoDialog.inject(Activity)` + 示例 dex）
-4. 侧边栏 → **注入** → 选 APK → 选配置 → 开始注入
-5. 结果卡上有「安装 / MT 定位 / 分享」
+2. 控制台 → **选 APK 开始**（自动读出 LAUNCHER Activity 与它已有的方法）
+3. 选一套配置；没有就点「新建」，或先点「先填一套示例跑通流程」
+4. 确认注入点（下拉里标着「已有 / 将创建 / native 不可插」）→ **开始注入**
+5. 跑完看进度、日志与产物，卡上有「安装 / MT 定位 / 分享」
+
+任务会留一条记录在控制台：下次想换套配置再注入，点记录就行，不用重新找包。
 
 ---
 

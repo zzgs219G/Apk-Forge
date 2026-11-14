@@ -8,15 +8,25 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+/**
+ * 顶栏。
+ *
+ * @param leadingIcon 左侧图标；默认汉堡菜单。子页（如从控制台推入的配置页）
+ *   传返回箭头，让「点这里能回去」这件事不需要用户猜返回键在哪。
+ * @param leadingLabel 左侧图标的无障碍描述
+ */
 @Composable
 fun AppTopBar(
     title: String,
     modifier: Modifier = Modifier,
     onMenuClick: () -> Unit,
+    leadingIcon: ImageVector = Icons.Default.Menu,
+    leadingLabel: String = "打开侧边栏",
     actions: @Composable RowScope.() -> Unit = {}
 ) {
     Surface(
@@ -35,10 +45,7 @@ fun AppTopBar(
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onMenuClick) {
-                Icon(
-                    imageVector = Icons.Default.Menu,
-                    contentDescription = "打开侧边栏"
-                )
+                Icon(imageVector = leadingIcon, contentDescription = leadingLabel)
             }
             Text(
                 text = title,
