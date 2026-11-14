@@ -3,8 +3,8 @@ package com.xixin.apkforge.ui.screen.inject
 import android.app.Activity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.ui.draw.clip
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,11 +14,31 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -26,51 +46,43 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.xixin.apkforge.core.apk.ApkInjectPipeline
+import com.xixin.apkforge.core.dex.LifecyclePoints
 import com.xixin.apkforge.data.ConfigStore
 import com.xixin.apkforge.data.FilePicker
+import com.xixin.apkforge.data.OutputStore
 import com.xixin.apkforge.feature.inject.InjectUiState
 import com.xixin.apkforge.feature.inject.InjectViewModel
-import com.xixin.apkforge.core.dex.LifecyclePoints
-import com.xixin.apkforge.data.OutputStore
 import com.xixin.apkforge.feature.inject.Phase
 import com.xixin.apkforge.ui.anim.InjectAnimation
-import com.xixin.apkforge.ui.design.Collapsible
-import com.xixin.apkforge.ui.design.CollapsibleHeader
-import com.xixin.apkforge.ui.design.Dim
-import com.xixin.apkforge.ui.design.Forge
-import com.xixin.apkforge.ui.design.ForgeChip
-import com.xixin.apkforge.ui.design.ForgeChipFlow
-import com.xixin.apkforge.ui.design.ForgeCodeField
-import com.xixin.apkforge.ui.design.ForgeEmptyState
-import com.xixin.apkforge.ui.design.ForgeField
-import com.xixin.apkforge.ui.design.ForgeFileRow
-import com.xixin.apkforge.ui.design.ForgePopup
-import com.xixin.apkforge.ui.design.ForgePopupItem
-import com.xixin.apkforge.ui.design.ForgePrimaryButton
-import com.xixin.apkforge.ui.design.ForgeSecondaryButton
-import com.xixin.apkforge.ui.design.ForgeSelectRow
-import com.xixin.apkforge.ui.design.ForgeSmallButton
-import com.xixin.apkforge.ui.design.ForgeStatus
-import com.xixin.apkforge.ui.design.ForgeTopBar
-import com.xixin.apkforge.ui.design.HairLine
-import com.xixin.apkforge.ui.design.KVRow
-import com.xixin.apkforge.ui.design.Metric
-import com.xixin.apkforge.ui.design.SectionLabel
-import com.xixin.apkforge.ui.design.StatusKind
-import com.xixin.apkforge.ui.design.TerminalBlock
-import com.xixin.apkforge.ui.design.VGap
-import com.xixin.apkforge.ui.design.pressBounce
+import com.xixin.apkforge.ui.lifted.page.AppTopBar
+import com.xixin.apkforge.ui.lifted.Gap
+import com.xixin.apkforge.ui.lifted.HGap
+import com.xixin.apkforge.ui.lifted.SectionTitle
+import com.xixin.apkforge.ui.lifted.AppConstants
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.material3.ExposedDropdownMenuAnchorType
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenu
+import com.xixin.apkforge.ui.lifted.components.input.ToolSingleLineInput
 
 /**
  * 注入页。
  *
- * 结构严格按「配置 → 输入 → 执行 → 结果」的依赖顺序，用 [Forge] 组件库拼装。
- * 不再有手写的临时布局——每个元素都来自 `ui/design/`。
+ * 组件一律用 **M3 标准件**（Card / OutlinedTextField / FilterChip / DropdownMenu /
+ * Button），颜色与字号走 `MaterialTheme` 角色，不自造视觉。
+ * 参考 jian_box `page/toolbox/ToolboxPage.kt` 的卡片栈式布局：
+ * 圆角 20~24dp、`CardDefaults.cardColors(containerColor = surfaceContainerLow)`、
+ * 零阴影。
  */
 @Composable
 fun InjectScreen(
@@ -103,118 +115,98 @@ fun InjectScreen(
         }
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(Forge.Colors.bg)
-    ) {
-        ForgeTopBar(
+    Column(Modifier.fillMaxSize()) {
+        AppTopBar(
             title = "注入",
-            subtitle = state.activeConfigName ?: "选择 APK 并粘贴调用",
-            onMenu = onOpenDrawer,
-            trailing = { PhaseStatus(state.phase) },
+            onMenuClick = onOpenDrawer,
+            actions = { PhaseBadge(state.phase) },
         )
 
         LazyColumn(
             modifier = Modifier.weight(1f),
             contentPadding = PaddingValues(
-                start = Dim.edge, end = Dim.edge, bottom = Dim.edge
+                start = AppConstants.SCREEN_EDGE_PADDING,
+                end = AppConstants.SCREEN_EDGE_PADDING,
+                top = 12.dp,
+                bottom = 12.dp,
             ),
-            verticalArrangement = Arrangement.spacedBy(Dim.sectionGap),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // ① 配置
+            // 配置
             item {
-                Column {
-                    SectionLabel(
-                        "配置",
-                        trailing = if (state.configs.isEmpty()) "无" else "${state.configs.size}",
-                    )
-                    VGap(10.dp)
-                    if (state.configs.isEmpty()) {
-                        Box(
-                            Modifier
-                                .fillMaxWidth()
-                                .background(Forge.Colors.surface, Forge.Shape.card)
-                        ) {
-                            ForgeEmptyState(
-                                title = "还没有配置",
-                                detail = "一套配置 = 调用行 + payload dex。建好后注入时直接选用。",
-                                action = {
-                                    ForgeSecondaryButton("去创建配置", onOpenConfig)
-                                },
-                            )
-                        }
-                    } else {
-                        ConfigSelector(
-                            configs = state.configs,
-                            activeId = state.activeConfigId,
-                            onApply = vm::applyConfig,
-                            onClear = vm::clearActiveConfig,
-                        )
-                    }
-                }
+                ConfigCard(
+                    configs = state.configs,
+                    activeId = state.activeConfigId,
+                    onApply = vm::applyConfig,
+                    onClear = vm::clearActiveConfig,
+                    onOpenConfig = onOpenConfig,
+                )
             }
 
-            // ② APK
+            // APK
             item {
-                Column {
-                    SectionLabel(
-                        "目标 APK",
-                        trailing = state.apkFile?.let { "${it.length() / 1024 / 1024} MB" },
-                    )
-                    VGap(10.dp)
-                    ForgeFileRow(
-                        label = state.apkFile?.name ?: "选择 APK",
+                SectionCard(title = "目标 APK") {
+                    FilePickRow(
+                        title = state.apkFile?.name ?: "选择 APK",
                         detail = state.apkFile?.let {
                             if (state.classFound) {
-                                "LAUNCHER ${state.launcherCandidates.size} 个 · 已解析"
+                                "${it.length() / 1024 / 1024} MB · LAUNCHER ${state.launcherCandidates.size} 个"
                             } else {
-                                "已选择"
+                                "${it.length() / 1024 / 1024} MB"
                             }
                         },
-                        filled = state.apkFile != null,
-                        busyLabel = if (state.parsingApk) "解析中" else null,
-                        onPick = { apkPicker.launch(FilePicker.pickApkIntent(context)) },
+                        selected = state.apkFile != null,
+                        busy = state.parsingApk,
+                        onClick = { apkPicker.launch(FilePicker.pickApkIntent(context)) },
                         onClear = state.apkFile?.let { { vm.clearApk() } },
                     )
                 }
             }
 
-            // ③ 注入点
+            // 注入点
             item {
-                Column {
-                    SectionLabel(
-                        "注入点",
-                        trailing = state.classSuperType?.let(::simpleName),
-                    )
-                    VGap(10.dp)
-                    ForgeField(
+                SectionCard(title = "注入点") {
+                    ToolSingleLineInput(
                         value = state.targetClass,
                         onValueChange = vm::setTargetClass,
+                        label = "类名",
                         placeholder = "com.example.app.MainActivity",
-                        keyboardType = KeyboardType.Uri,
-                        trailing = if (state.targetClass.isNotBlank()) {
-                            if (state.classFound) "✓" else "?"
-                        } else null,
-                        trailingColor = if (state.classFound) {
-                            Forge.Colors.accent
+                        isError = state.targetClass.isNotBlank() && !state.classFound,
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                            keyboardType = KeyboardType.Uri,
+                            imeAction = ImeAction.Done,
+                        ),
+                    )
+                    Gap(6.dp)
+                    Text(
+                        when {
+                            state.targetClass.isBlank() -> "留空则自动取 Manifest 的 LAUNCHER"
+                            state.classFound ->
+                                "已找到 · 父类 " +
+                                    (state.classSuperType?.let(::simpleName) ?: "?")
+                            else -> "包里没有这个类，请检查拼写"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (state.targetClass.isNotBlank() && !state.classFound) {
+                            MaterialTheme.colorScheme.error
                         } else {
-                            Forge.Colors.danger
+                            MaterialTheme.colorScheme.onSurfaceVariant
                         },
                     )
 
                     if (state.launcherCandidates.size > 1) {
-                        VGap(9.dp)
-                        ForgeChipFlow(items = state.launcherCandidates, perRow = 3) { c ->
-                            ForgeChip(
-                                text = c.substringAfterLast('.'),
-                                selected = c == state.targetClass,
-                                onClick = { vm.setTargetClass(c) },
-                            )
+                        Gap(8.dp)
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            state.launcherCandidates.take(3).forEach { c ->
+                                AssistChip(
+                                    onClick = { vm.setTargetClass(c) },
+                                    label = { Text(c.substringAfterLast('.')) },
+                                )
+                            }
                         }
                     }
 
-                    VGap(16.dp)
+                    Gap(12.dp)
                     MethodSelector(
                         points = state.lifecyclePoints,
                         selected = state.targetMethod,
@@ -223,66 +215,22 @@ fun InjectScreen(
                         onCustom = { vm.setTargetMethod("") },
                     )
 
-                    // 只有非标准方法才需要输入框
                     if (state.lifecyclePoints.none { it.name == state.targetMethod }) {
-                        VGap(9.dp)
-                        ForgeField(
+                        Gap(8.dp)
+                        ToolSingleLineInput(
                             value = state.targetMethod,
                             onValueChange = vm::setTargetMethod,
-                            placeholder = "自定义方法名",
-                            keyboardType = KeyboardType.Ascii,
+                            label = "自定义方法名",
+                            placeholder = "方法名",
                         )
                     }
-
-                    VGap(9.dp)
-                    Text(
-                        "签名 ${state.targetSignature}",
-                        style = Forge.Type.microMono,
-                        color = Forge.Colors.textFaint,
-                    )
-                }
-            }
-
-            // ④ 调用
-            item {
-                Column {
-                    SectionLabel("调用", trailing = "${state.callCount} 条")
-                    VGap(10.dp)
-                    ForgeCodeField(
-                        value = state.callsText,
-                        onValueChange = vm::setCallsText,
-                        placeholder = "invoke-static {p0}, Lcom/foo/Bar;->init(Landroid/app/Activity;)V",
-                        isError = state.callErrors.isNotEmpty(),
-                        minHeight = 124.dp,
-                    )
-                    if (state.callErrors.isNotEmpty()) {
-                        VGap(8.dp)
-                        state.callErrors.forEach {
-                            Text(it, style = Forge.Type.microMono, color = Forge.Colors.danger)
-                        }
-                    }
-                }
-            }
-
-            // ⑤ payload
-            item {
-                Column {
-                    SectionLabel("Payload dex")
-                    VGap(10.dp)
-                    ForgeFileRow(
-                        label = state.payloadDex?.name ?: "选择 dex",
-                        detail = state.payloadDex?.let { "${it.length() / 1024} KB" },
-                        filled = state.payloadDex != null,
-                        onPick = { dexPicker.launch(FilePicker.pickDexIntent(context)) },
-                        onClear = state.payloadDex?.let { { vm.clearPayloadDex() } },
-                    )
                 }
             }
 
             // 结果
             state.result?.let { r ->
                 item {
-                    ResultSection(
+                    ResultCard(
                         result = r,
                         saved = state.savedOutput,
                         onInstall = {
@@ -305,77 +253,169 @@ fun InjectScreen(
 
             // 日志
             if (state.steps.isNotEmpty()) {
-                item { LogSection(state.steps) }
+                item { LogCard(state.steps) }
             }
-
-            item { Spacer(Modifier.height(4.dp)) }
         }
 
-        BottomAction(state, vm::run)
+        // 底部动作区，避开导航栏
+        BottomBar(state = state, onRun = vm::run)
     }
 }
 
-// ══════════════════════════ 局部组件 ══════════════════════════
+// ══════════════════════════ 组件 ══════════════════════════
 
 @Composable
-private fun PhaseStatus(phase: Phase) {
-    when {
-        phase == Phase.DONE -> ForgeStatus("完成", StatusKind.OK)
-        phase == Phase.FAILED -> ForgeStatus("失败", StatusKind.ERROR)
-        phase == Phase.IDLE -> ForgeStatus("就绪", StatusKind.IDLE)
-        else -> ForgeStatus("运行中", StatusKind.WARN)
+private fun PhaseBadge(phase: Phase) {
+    val (text, color) = when (phase) {
+        Phase.DONE -> "完成" to MaterialTheme.colorScheme.primary
+        Phase.FAILED -> "失败" to MaterialTheme.colorScheme.error
+        Phase.IDLE -> "就绪" to MaterialTheme.colorScheme.onSurfaceVariant
+        else -> "运行中" to MaterialTheme.colorScheme.tertiary
+    }
+    Surface(
+        shape = RoundedCornerShape(100.dp),
+        color = color.copy(alpha = 0.14f),
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.labelSmall,
+            color = color,
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+        )
     }
 }
 
+/** M3 Card 包裹的区块。零阴影 + surfaceContainerLow，与 jian_box 工具页一致。 */
 @Composable
-private fun ConfigSelector(
+private fun SectionCard(
+    title: String,
+    trailing: String? = null,
+    content: @Composable () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .animateContentSize()
+                .padding(14.dp)
+        ) {
+            SectionTitle(title, trailing = trailing)
+            Gap(10.dp)
+            content()
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ConfigCard(
     configs: List<ConfigStore.Config>,
     activeId: String?,
     onApply: (ConfigStore.Config) -> Unit,
     onClear: () -> Unit,
+    onOpenConfig: () -> Unit,
 ) {
-    var menu by remember { mutableStateOf(false) }
+    var expanded by remember { mutableStateOf(false) }
     val active = configs.firstOrNull { it.id == activeId }
 
-    Box {
-        ForgeSelectRow(
-            title = "选择一套配置",
-            value = active?.name,
-            detail = active?.let {
-                "${it.callCount} 条调用 · ${it.targetMethod} · " +
-                    if (it.hasDex) "dex ${it.dexSizeKb}KB" else "无 dex"
-            } ?: "${configs.size} 套可用",
-            accentBorder = active != null,
-            onClick = { menu = true },
-            trailingAction = if (active != null) {
-                {
-                    Box(
-                        Modifier
-                            .clip(Forge.Shape.chip)
-                            .background(Forge.Colors.surfaceHigh)
-                            .pressBounce(onClick = onClear)
-                            .padding(horizontal = 9.dp, vertical = 5.dp)
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            SectionTitle("配置", trailing = if (configs.isEmpty()) null else "${configs.size}")
+
+            if (configs.isEmpty()) {
+                Gap(8.dp)
+                Text(
+                    "还没有配置。一套配置 = 调用行 + payload dex。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Gap(8.dp)
+                OutlinedButton(onClick = onOpenConfig) { Text("去创建配置") }
+            } else {
+                Gap(8.dp)
+                // M3 标准的可选下拉：ExposedDropdownMenuBox + menuAnchor。
+                // 之前用 Box + DropdownMenu 手动定位，锚点算不准会跑到屏幕左边；
+                // menuAnchor 把菜单绑定到输入框本身，位置由框架保证。
+                ExposedDropdownMenuBox(
+                    expanded = expanded,
+                    onExpandedChange = { expanded = it },
+                ) {
+                    OutlinedTextField(
+                        value = active?.name ?: "选择一套配置",
+                        onValueChange = {},
+                        readOnly = true,
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, true),
+                        supportingText = {
+                            Text(
+                                active?.let {
+                                    "${it.callCount} 条 · ${it.targetMethod} · " +
+                                        if (it.hasDex) "dex ${it.dexSizeKb}KB" else "无 dex"
+                                } ?: "${configs.size} 套可用",
+                            )
+                        },
+                        trailingIcon = {
+                            val rotation by animateFloatAsState(
+                                targetValue = if (expanded) 180f else 0f,
+                                label = "cfgArrow",
+                            )
+                            Icon(
+                                Icons.Filled.KeyboardArrowDown,
+                                contentDescription = null,
+                                modifier = Modifier.rotate(rotation),
+                            )
+                        },
+                    )
+                    ExposedDropdownMenu(
+                        expanded = expanded,
+                        onDismissRequest = { expanded = false },
                     ) {
-                        Text("取消", style = Forge.Type.label, color = Forge.Colors.textFaint)
+                        configs.forEach { cfg ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text(cfg.name, style = MaterialTheme.typography.bodyMedium)
+                                        Text(
+                                            "${cfg.callCount} 条 · ${cfg.targetMethod}" +
+                                                if (cfg.hasDex) " · 带 dex" else " · 无 dex",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    onApply(cfg)
+                                    expanded = false
+                                },
+                            )
+                        }
                     }
                 }
-            } else null,
-        )
-        ForgePopup(expanded = menu, onDismiss = { menu = false }) {
-            configs.forEach { cfg ->
-                ForgePopupItem(
-                    title = cfg.name,
-                    subtitle = "${cfg.callCount} 条 · ${cfg.targetMethod}" +
-                        if (cfg.hasDex) " · 带 dex" else " · 无 dex",
-                    badge = if (cfg.id == activeId) "当前" else null,
-                    selected = cfg.id == activeId,
-                    onClick = { onApply(cfg); menu = false },
-                )
+                if (active != null) {
+                    TextButton(onClick = onClear) { Text("取消套用") }
+                }
             }
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun MethodSelector(
     points: List<LifecyclePoints.Point>,
@@ -384,47 +424,170 @@ private fun MethodSelector(
     onSelect: (LifecyclePoints.Point) -> Unit,
     onCustom: () -> Unit,
 ) {
-    var showAll by remember { mutableStateOf(false) }
-    val shown = if (showAll) points else points.take(6)
+    var expanded by remember { mutableStateOf(false) }
+    val current = points.firstOrNull { it.name == selected }
+    val isCustom = current == null
 
-    Column {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("注入到", style = Forge.Type.label, color = Forge.Colors.textFaint)
-            Spacer(Modifier.weight(1f))
-            if (points.size > 6) {
-                Box(
-                    Modifier
-                        .pressBounce { showAll = !showAll }
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    Text(
-                        if (showAll) "收起" else "更多 ${points.size - 6}",
-                        style = Forge.Type.label,
-                        color = Forge.Colors.accent,
-                    )
-                }
+    // 标准 M3 下拉。之前把 9 个方法平铺成 chip 行，占三行且视觉噪音大——
+    // 注入点是一个「单选」语义，下拉才是对的控件。
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+    ) {
+        OutlinedTextField(
+            value = selected.ifBlank { "选择方法" },
+            onValueChange = {},
+            readOnly = true,
+            singleLine = true,
+            label = { Text("注入到") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, true),
+            supportingText = {
+                Text(
+                    when {
+                        isCustom -> "自定义方法 · 不存在时会自动创建"
+                        existsCheck(current!!) -> current.hint
+                        else -> "${current.hint} · 类里没有，将自动创建"
+                    },
+                )
+            },
+            trailingIcon = {
+                val rotation by animateFloatAsState(
+                    targetValue = if (expanded) 180f else 0f,
+                    label = "methodArrow",
+                )
+                Icon(
+                    Icons.Filled.KeyboardArrowDown,
+                    contentDescription = null,
+                    modifier = Modifier.rotate(rotation),
+                )
+            },
+            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                fontFamily = FontFamily.Monospace
+            ),
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            points.forEach { p ->
+                val exists = existsCheck(p)
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    p.name,
+                                    style = MaterialTheme.typography.bodyMedium.copy(
+                                        fontFamily = FontFamily.Monospace
+                                    ),
+                                )
+                                if (!exists) {
+                                    HGap(6.dp)
+                                    Surface(
+                                        shape = RoundedCornerShape(100.dp),
+                                        color = MaterialTheme.colorScheme.tertiaryContainer,
+                                    ) {
+                                        Text(
+                                            "新建",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                            modifier = Modifier.padding(
+                                                horizontal = 6.dp, vertical = 1.dp
+                                            ),
+                                        )
+                                    }
+                                }
+                            }
+                            Text(
+                                p.hint,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    onClick = {
+                        onSelect(p)
+                        expanded = false
+                    },
+                )
             }
-        }
-        VGap(8.dp)
-        ForgeChipFlow(items = shown, perRow = 3) { p ->
-            ForgeChip(
-                text = p.name,
-                selected = p.name == selected,
-                onClick = { onSelect(p) },
-                badge = if (existsCheck(p)) null else "新",
+            DropdownMenuItem(
+                text = { Text("自定义方法…", style = MaterialTheme.typography.bodyMedium) },
+                onClick = {
+                    onCustom()
+                    expanded = false
+                },
             )
         }
-        VGap(8.dp)
-        ForgeChip(
-            text = "自定义…",
-            selected = points.none { it.name == selected },
-            onClick = onCustom,
-        )
     }
 }
 
 @Composable
-private fun ResultSection(
+private fun FilePickRow(
+    title: String,
+    detail: String?,
+    selected: Boolean,
+    busy: Boolean,
+    onClick: () -> Unit,
+    onClear: (() -> Unit)?,
+) {
+    OutlinedCard(
+        onClick = onClick,
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.outlinedCardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest
+        ),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    title,
+                    style = if (selected) {
+                        MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace)
+                    } else {
+                        MaterialTheme.typography.bodyMedium
+                    },
+                    color = if (selected) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (detail != null) {
+                    Text(
+                        detail,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
+            }
+            when {
+                busy -> CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                )
+                onClear != null -> TextButton(onClick = onClear) { Text("清除") }
+                else -> Text(
+                    "选择",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ResultCard(
     result: ApkInjectPipeline.Result,
     saved: OutputStore.Saved?,
     onInstall: () -> Unit,
@@ -434,121 +597,167 @@ private fun ResultSection(
 ) {
     val ok = result.ok && saved != null
 
-    Column {
-        SectionLabel("结果", trailing = if (ok) "成功" else "失败")
-        VGap(10.dp)
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (ok) {
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+            } else {
+                MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
+            }
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Text(
+                if (ok) "注入成功" else "注入失败",
+                style = MaterialTheme.typography.titleMedium,
+                color = if (ok) MaterialTheme.colorScheme.primary
+                else MaterialTheme.colorScheme.error,
+            )
 
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .background(Forge.Colors.surface, Forge.Shape.card)
-                .padding(16.dp)
-        ) {
             if (!ok) {
+                Gap(8.dp)
                 Text(
                     result.error ?: "产物写入 Download 失败",
-                    style = Forge.Type.code,
-                    color = Forge.Colors.danger,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
                 )
-                VGap(14.dp)
-                ForgeSecondaryButton("重试", onReset, Modifier.fillMaxWidth())
+                Gap(10.dp)
+                OutlinedButton(onClick = onReset) { Text("重试") }
                 return@Column
             }
 
-            Row(Modifier.fillMaxWidth()) {
-                Metric(
-                    "${result.injectedCount}",
-                    "注入调用",
-                    Modifier.weight(1f),
-                    Forge.Colors.accent,
-                )
-                Metric(
-                    "${(result.stats?.outputSize ?: 0) / 1024 / 1024}",
-                    "MB 产物",
-                    Modifier.weight(1f),
-                )
-                Metric(
-                    result.stats?.addedDex?.removeSuffix(".dex")?.removePrefix("classes") ?: "—",
-                    "追加 dex",
-                    Modifier.weight(1f),
-                    if (result.stats?.addedDex != null) Forge.Colors.accent
-                    else Forge.Colors.textFaint,
-                )
-            }
-
-            VGap(18.dp)
-            SectionLabel("输出路径", Modifier)
-            VGap(7.dp)
-            TerminalBlock {
+            Gap(12.dp)
+            Text(
+                "输出路径",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Gap(4.dp)
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Text(
                     saved.file.absolutePath,
-                    style = Forge.Type.microMono,
-                    color = Forge.Colors.accent,
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(10.dp),
                 )
             }
 
-            VGap(14.dp)
+            Gap(10.dp)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ForgeSmallButton("安装", onInstall, filled = true)
-                ForgeSmallButton("MT 定位", onLocate)
-                ForgeSmallButton("分享", onShare)
+                Button(onClick = onInstall) { Text("安装") }
+                OutlinedButton(onClick = onLocate) { Text("MT 定位") }
+                OutlinedButton(onClick = onShare) { Text("分享") }
             }
 
-            VGap(16.dp)
-            HairLine()
-            VGap(12.dp)
-            KVRow("包名", result.packageName ?: "?")
-            KVRow("注入点", result.resolvedClass ?: "?")
-            KVRow(
-                "体积",
-                "${(result.stats?.originalSize ?: 0) / 1024 / 1024} → " +
-                    "${(result.stats?.outputSize ?: 0) / 1024 / 1024} MB",
-            )
-            VGap(10.dp)
+            Gap(12.dp)
+            Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                MetricItem("${result.injectedCount}", "注入调用")
+                MetricItem(
+                    "${(result.stats?.outputSize ?: 0) / 1024 / 1024}",
+                    "MB 产物",
+                )
+                MetricItem(
+                    result.stats?.addedDex?.removeSuffix(".dex")?.removePrefix("classes") ?: "—",
+                    "追加 dex",
+                )
+            }
+
+            Gap(10.dp)
             Text(
                 "未重签名，只能覆盖安装到已装同签名包的设备。",
-                style = Forge.Type.caption,
-                color = Forge.Colors.textFaint,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
 }
 
 @Composable
-private fun LogSection(steps: List<ApkInjectPipeline.Step>) {
-    var open by remember { mutableStateOf(false) }
+private fun MetricItem(value: String, label: String) {
     Column {
-        CollapsibleHeader(
-            title = "执行日志",
-            trailing = "${steps.size}",
-            open = open,
-            onToggle = { open = !open },
+        Text(value, style = MaterialTheme.typography.headlineSmall)
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Collapsible(open) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(top = 10.dp)
-                    .background(Forge.Colors.surfaceHigh, Forge.Shape.data)
-                    .padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(3.dp),
+    }
+}
+
+@Composable
+private fun LogCard(steps: List<ApkInjectPipeline.Step>) {
+    var open by remember { mutableStateOf(false) }
+
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            // 整行可点：用 Surface + transparent 承载点击，避免嵌套 clickable 冲突
+            Surface(
+                onClick = { open = !open },
+                color = androidx.compose.ui.graphics.Color.Transparent,
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                steps.forEach { s ->
-                    Row {
-                        Text(
-                            if (s.warn) "!" else "›",
-                            style = Forge.Type.microMono,
-                            color = if (s.warn) Forge.Colors.danger else Forge.Colors.accent,
-                        )
-                        Spacer(Modifier.width(7.dp))
-                        Text(s.label, style = Forge.Type.microMono, color = Forge.Colors.textDim)
-                        if (s.detail.isNotBlank()) {
-                            Spacer(Modifier.width(7.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "执行日志 (${steps.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Icon(
+                        Icons.Filled.KeyboardArrowDown,
+                        contentDescription = if (open) "收起" else "展开",
+                        modifier = Modifier.rotate(if (open) 180f else 0f),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            AnimatedVisibility(visible = open) {
+                Column(Modifier.padding(top = 10.dp)) {
+                    steps.forEach { s ->
+                        Row(Modifier.padding(vertical = 1.dp)) {
                             Text(
-                                s.detail,
-                                style = Forge.Type.microMono,
-                                color = if (s.warn) Forge.Colors.danger else Forge.Colors.text,
+                                if (s.warn) "!" else "›",
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontFamily = FontFamily.Monospace
+                                ),
+                                color = if (s.warn) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.primary,
                             )
+                            HGap(6.dp)
+                            Text(
+                                s.label,
+                                style = MaterialTheme.typography.labelSmall.copy(
+                                    fontFamily = FontFamily.Monospace
+                                ),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            if (s.detail.isNotBlank()) {
+                                HGap(6.dp)
+                                Text(
+                                    s.detail,
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontFamily = FontFamily.Monospace
+                                    ),
+                                    color = if (s.warn) MaterialTheme.colorScheme.error
+                                    else MaterialTheme.colorScheme.onSurface,
+                                )
+                            }
                         }
                     }
                 }
@@ -558,44 +767,55 @@ private fun LogSection(steps: List<ApkInjectPipeline.Step>) {
 }
 
 @Composable
-private fun BottomAction(state: InjectUiState, onRun: () -> Unit) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .background(Forge.Colors.bg)
+private fun BottomBar(state: InjectUiState, onRun: () -> Unit) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        tonalElevation = 3.dp,
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        HairLine(Modifier)
-        Column(Modifier.padding(horizontal = Dim.edge, vertical = 14.dp)) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .padding(horizontal = AppConstants.SCREEN_EDGE_PADDING, vertical = 12.dp)
+        ) {
             if (state.running) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     InjectAnimation(
                         style = state.animationStyle,
                         phaseLabel = state.phase.label,
-                        size = 88.dp,
+                        size = 76.dp,
                     )
-                    Spacer(Modifier.width(18.dp))
+                    HGap(16.dp)
                     Column(Modifier.weight(1f)) {
-                        Text(state.phase.label, style = Forge.Type.title, color = Forge.Colors.text)
-                        VGap(4.dp)
+                        Text(
+                            state.phase.label,
+                            style = MaterialTheme.typography.titleMedium,
+                        )
                         Text(
                             "处理中，请稍候",
-                            style = Forge.Type.caption,
-                            color = Forge.Colors.textFaint,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
             } else {
-                ForgePrimaryButton(
-                    text = "开始注入",
+                Button(
                     onClick = onRun,
                     enabled = state.canRun,
-                )
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
+                ) {
+                    Text("开始注入", style = MaterialTheme.typography.titleMedium)
+                }
                 if (state.missing.isNotEmpty()) {
-                    VGap(8.dp)
+                    Gap(6.dp)
                     Text(
                         "还缺：" + state.missing.joinToString("、"),
-                        style = Forge.Type.caption,
-                        color = Forge.Colors.textFaint,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }

@@ -1,4 +1,4 @@
-package com.xixin.apkforge.ui.design
+package com.xixin.apkforge.ui.lifted.m3e
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -7,6 +7,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -17,24 +18,18 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
 
 /**
- * 缩放按压反馈。移植自 jian_box `wrapper/ui/m3e/PressBounceModifier.kt`。
+ * 通用 M3 缩放按压反馈积木：替代各页面手工声明的
+ * interactionSource + animateFloatAsState + graphicsLayer 样板代码。
  *
- * 为什么必须用它而不是 `Modifier.clickable`：
- *  - 本项目视觉语言偏「硬件」，涟漪（ripple）在这个调性里是噪音
- *  - 缩放本身即反馈，且能在深色底上清晰可见
- *
- * 注意 `indication = null`：缩放已经是反馈，再叠涟漪就是双层反馈。
- *
- * @param targetScale 按下时缩放目标值，默认 [Motion.PRESS_SCALE]
- * @param onLongClick 可选长按（存在时内部走 combinedClickable）
- * @param onClick 点击回调（置于末位以支持 trailing lambda）
+ * @param targetScale 按下时的缩放目标值
+ * @param onLongClick 可选长按回调（存在时内部使用 combinedClickable，兼容工具箱长按固定等场景）
+ * @param onClick 点击回调（置于末位以支持 trailing lambda 写法）
  */
 @OptIn(ExperimentalComposeUiApi::class, ExperimentalFoundationApi::class)
 fun Modifier.pressBounce(
-    targetScale: Float = Motion.PRESS_SCALE,
-    enabled: Boolean = true,
+    targetScale: Float = 0.96f,
     onLongClick: (() -> Unit)? = null,
-    onClick: () -> Unit,
+    onClick: () -> Unit
 ): Modifier = composed {
     val interactionSource = remember { MutableInteractionSource() }
     val scaled = pressBounceScale(targetScale, interactionSource)
@@ -42,57 +37,71 @@ fun Modifier.pressBounce(
         scaled.combinedClickable(
             interactionSource = interactionSource,
             indication = null,
-            enabled = enabled,
             onClick = onClick,
-            onLongClick = onLongClick,
+            onLongClick = onLongClick
         )
     } else {
         scaled.clickable(
             interactionSource = interactionSource,
             indication = null,
-            enabled = enabled,
-            onClick = onClick,
+            onClick = onClick
         )
     }
 }
 
 /**
- * 带勾选语义的按压反馈。
+ * 带「勾选语义」的缩放按压积木：与 [pressBounce] 共用同一缩放物理
+ * （同参数、同 `fastSpatialSpec`），差别只在底层手势用 `toggleable` 而非 `clickable`。
  *
  * 为什么必须单独存在：`clickable` 无法向 TalkBack 暴露 `checked` 状态，
- * 勾选/单选项用 `clickable` 读屏只会读成普通按钮，用户无从判断是否已选。
+ * 勾选/单选项用 `clickable` 读屏时只会读成普通按钮（"双击激活"），
+ * 用户在读屏下无从判断该项是否已选。`toggleable(value, role)` 才会播报"已选中 / 未选中"。
+ *
+ * 用法（整行可点的勾选行，不必精准点到复选框）：
+ * ```
+ * Row(Modifier.pressBounceToggleable(checked, Role.Checkbox) { onToggle(it) }) { … }
+ * ```
+ *
+ * @param value 当前勾选状态（同时决定读屏播报与语义树中的 checked）
+ * @param role [Role.Checkbox] 多选行 / [Role.RadioButton] 单选行
+ * @param targetScale 按下时的缩放目标值，默认与 [pressBounce] 一致
+ * @param onValueChange 勾选变化回调（置于末位以支持 trailing lambda 写法）
  */
 @OptIn(ExperimentalComposeUiApi::class, ExperimentalFoundationApi::class)
 fun Modifier.pressBounceToggleable(
     value: Boolean,
     role: Role = Role.Checkbox,
-    targetScale: Float = Motion.PRESS_SCALE,
+    targetScale: Float = 0.96f,
     enabled: Boolean = true,
-    onValueChange: (Boolean) -> Unit,
+    onValueChange: (Boolean) -> Unit
 ): Modifier = composed {
     val interactionSource = remember { MutableInteractionSource() }
     pressBounceScale(targetScale, interactionSource).toggleable(
         value = value,
         interactionSource = interactionSource,
-        indication = null,
+        indication = null,   // 缩放本身即反馈，再叠涟漪会双层反馈
         enabled = enabled,
         role = role,
-        onValueChange = onValueChange,
+        onValueChange = onValueChange
     )
 }
 
-/** 缩放物理本体，`pressBounce` 与 `pressBounceToggleable` 共用，保证手感一致。 */
+/**
+ * 缩放物理本体（[pressBounce] 与 [pressBounceToggleable] 共用，保证两处手感完全一致）。
+ * 动画槽位与既有实现一字未改：`fastSpatialSpec()`。
+ */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun Modifier.pressBounceScale(
     targetScale: Float,
-    interactionSource: MutableInteractionSource,
+    interactionSource: MutableInteractionSource
 ): Modifier {
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
         targetValue = if (isPressed) targetScale else 1f,
-        animationSpec = Motion.Spring.Press,
-        label = "pressBounceScale",
+        // 原写法 spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow)（= 0.5 / 400）
+        animationSpec = MaterialTheme.motionScheme.fastSpatialSpec(),
+        label = "pressBounceScale"
     )
     return this.graphicsLayer {
         scaleX = scale

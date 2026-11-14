@@ -49,6 +49,15 @@ android {
         compose = true
     }
 
+    // 端到端测试会加载 37MB 的真实 APK 并重写 dex，默认堆（512MB）会 OOM。
+    // 2048MB 是实测能稳定跑完的下限。
+    testOptions {
+        unitTests.all {
+            it.maxHeapSize = "2048m"
+            it.jvmArgs("-XX:MaxMetaspaceSize=512m")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
@@ -70,6 +79,19 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
+    implementation(libs.androidx.material.icons.extended)
+
+    // material-kolor：色阶生成。其 POM 会以 runtime scope 传递 JetBrains CMP 组件，
+    // 且会把 material3 顶到 1.5.0-alpha17，与 BOM 的 foundation 1.12.0 错位，
+    // 运行期触发 OutlinedTextFieldDefaults 内部 lambda 的 AbstractMethodError 闪退。
+    // 故精确排除 CMP 传递依赖，material3/foundation 由显式声明接管。
+    // 注意 exclude 的 group 是精确匹配，写前缀 org.jetbrains.compose 排不掉任何东西。
+    implementation(libs.material.kolor) {
+        exclude(group = "org.jetbrains.compose.material3")
+        exclude(group = "org.jetbrains.compose.foundation")
+        exclude(group = "org.jetbrains.compose.runtime")
+        exclude(group = "org.jetbrains.compose.ui")
+    }
     // ui-test-manifest 本地 Gradle 缓存未覆盖，且本项目暂无 instrumentation test，
     // 暂不引入，避免 --offline 构建失败。后续需要 UI 测试时再补 catalog 条目。
     debugImplementation(libs.androidx.ui.tooling)

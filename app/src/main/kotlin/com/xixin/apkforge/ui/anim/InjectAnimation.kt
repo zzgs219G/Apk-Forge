@@ -44,14 +44,14 @@ fun InjectAnimation(
                 InjectSpinner(
                     phaseLabel = phaseLabel,
                     size = size,
-                    color = com.xixin.apkforge.ui.design.Forge.Colors.accent,
-                    trackColor = com.xixin.apkforge.ui.design.Forge.Colors.surfaceHigh,
+                    color = MaterialTheme.colorScheme.primary,
+                    trackColor = MaterialTheme.colorScheme.surfaceContainerHigh,
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
                     phaseLabel,
-                    style = com.xixin.apkforge.ui.design.Forge.Type.microMono,
-                    color = com.xixin.apkforge.ui.design.Forge.Colors.accent,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
                 )
             }
         }

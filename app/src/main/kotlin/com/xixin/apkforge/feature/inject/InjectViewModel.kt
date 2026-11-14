@@ -68,7 +68,7 @@ data class InjectUiState(
     val lifecyclePoints: List<LifecyclePoints.Point> = LifecyclePoints.ACTIVITY,
 
     /** 动画风格 */
-    val animationStyle: InjectAnimationStyle = InjectAnimationStyle.SVG_HEX,
+    val animationStyle: InjectAnimationStyle = InjectAnimationStyle.RING,
 ) {
     val missing: List<String>
         get() = buildList {

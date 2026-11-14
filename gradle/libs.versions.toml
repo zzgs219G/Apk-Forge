@@ -11,6 +11,10 @@ composeBom = "2026.08.00"
 # defaultSpatialSpec / defaultEffectsSpec / fastEffectsSpec 全部可用。
 material3 = "1.5.0-alpha26"
 
+# material-kolor：Material You 色阶生成（Google material-color-utilities 的 Kotlin 封装）
+# 用它的 SPEC_2025 色阶，而不是手写色值——手写必然调不出成体系的明暗层次。
+materialKolor = "5.0.0"
+
 # 以下三项 ApkForge 暂未引用（没有对应业务代码），先在 catalog 里备好版本，
 # 用到时在 app/build.gradle.kts 加一行 implementation 即可，不必再查版本。
 navigation = "2.8.5"
@@ -47,6 +51,11 @@ coil-compose = { group = "io.coil-kt.coil3", name = "coil-compose", version.ref 
 coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp", version.ref = "coil" }
 okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
 androidx-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+# material-icons-core 不在 compose-bom 的管辖内（BOM 只覆盖 compose.* 的一部分），
+# 显式指定版本；只用 core（20 个常用图标），不用 extended（2MB+）
+# extended 含 ContentPaste/ContentCopy/Download 等，容量换覆盖度；本项目 UI 依赖较大，值得
+androidx-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended", version = "1.7.8" }
+material-kolor = { group = "com.materialkolor", name = "material-kolor", version.ref = "materialKolor" }
 androidx-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
 
 smali-dexlib2 = { group = "com.android.tools.smali", name = "smali-dexlib2", version.ref = "smaliDexlib2" }

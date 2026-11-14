@@ -3,7 +3,7 @@ package com.xixin.apkforge.ui.screen.config
 import android.app.Activity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,11 +13,31 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -28,42 +48,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.xixin.apkforge.feature.config.ConfigEditorState
-import com.xixin.apkforge.data.ConfigStore
-import com.xixin.apkforge.feature.config.ConfigViewModel
-import com.xixin.apkforge.data.FilePicker
 import com.xixin.apkforge.core.dex.LifecyclePoints
-import com.xixin.apkforge.ui.design.Chevron
-import com.xixin.apkforge.ui.design.Dim
-import com.xixin.apkforge.ui.design.Forge
-import com.xixin.apkforge.ui.design.ForgeCard
-import com.xixin.apkforge.ui.design.ForgeChip
-import com.xixin.apkforge.ui.design.ForgeChipFlow
-import com.xixin.apkforge.ui.design.ForgeCodeField
-import com.xixin.apkforge.ui.design.ForgeEmptyState
-import com.xixin.apkforge.ui.design.ForgeField
-import com.xixin.apkforge.ui.design.ForgeFileRow
-import com.xixin.apkforge.ui.design.ForgePopup
-import com.xixin.apkforge.ui.design.ForgePopupItem
-import com.xixin.apkforge.ui.design.ForgePrimaryButton
-import com.xixin.apkforge.ui.design.ForgeSecondaryButton
-import com.xixin.apkforge.ui.design.ForgeSmallButton
-import com.xixin.apkforge.ui.design.ForgeStatus
-import com.xixin.apkforge.ui.design.ForgeTopBar
-import com.xixin.apkforge.ui.design.KVRow
-import com.xixin.apkforge.ui.design.LabeledField
-import com.xixin.apkforge.ui.design.SectionLabel
-import com.xixin.apkforge.ui.design.StatusKind
-import com.xixin.apkforge.ui.design.VGap
-import com.xixin.apkforge.ui.design.pressBounce
+import com.xixin.apkforge.data.ConfigStore
+import com.xixin.apkforge.data.FilePicker
+import com.xixin.apkforge.feature.config.ConfigEditorState
+import com.xixin.apkforge.feature.config.ConfigViewModel
+import com.xixin.apkforge.ui.lifted.page.AppTopBar
+import com.xixin.apkforge.ui.lifted.Gap
+import com.xixin.apkforge.ui.lifted.SectionTitle
+import com.xixin.apkforge.ui.lifted.AppConstants
+import com.xixin.apkforge.ui.lifted.components.input.ToolSingleLineInput
+import com.xixin.apkforge.ui.lifted.components.input.ToolInputField
 
 /**
- * 配置页。管理「调用 + dex」这套组合，与注入页共用 [Forge] 组件库。
+ * 配置页。全部使用 M3 标准组件。
  */
 @Composable
 fun ConfigScreen(
@@ -118,39 +121,32 @@ fun ConfigScreen(
         )
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(Forge.Colors.bg)
-    ) {
-        ForgeTopBar(
+    Column(Modifier.fillMaxSize()) {
+        AppTopBar(
             title = if (showEditor) "编辑配置" else "配置",
-            subtitle = if (showEditor) {
-                if (state.editingNew) "新建" else state.name.ifBlank { "未命名" }
-            } else {
-                "${state.configs.size} 套"
-            },
-            onMenu = {
+            onMenuClick = {
                 if (showEditor) {
                     if (state.dirty) confirmingDiscard = true else showEditor = false
                 } else {
                     onOpenDrawer()
                 }
             },
-            trailing = {
+            actions = {
                 if (showEditor) {
-                    ForgeSmallButton(
-                        text = "保存",
+                    Button(
                         onClick = { vm.save { showEditor = false } },
-                        color = if (state.canSave) Forge.Colors.accent else Forge.Colors.textFaint,
-                        filled = state.canSave,
-                    )
+                        enabled = state.canSave,
+                        shape = RoundedCornerShape(12.dp),
+                    ) { Text("保存") }
                 } else {
-                    ForgeSmallButton(
-                        text = "新建",
+                    FilledTonalButton(
                         onClick = { vm.startNew(); showEditor = true },
-                        filled = true,
-                    )
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Icon(Icons.Filled.Add, contentDescription = null, Modifier.size(18.dp))
+                        Spacer(Modifier.size(4.dp))
+                        Text("新建")
+                    }
                 }
             },
         )
@@ -168,26 +164,19 @@ fun ConfigScreen(
                     onSample = vm::loadSampleDex,
                 )
             } else if (state.configs.isEmpty()) {
-                ForgeEmptyState(
-                    title = "还没有配置",
-                    detail = "一套配置 = 若干条 smali 调用 + 一个 payload dex。\n建好后，注入时直接选用。",
-                    action = {
-                        ForgePrimaryButton(
-                            "新建配置",
-                            { vm.startNew(); showEditor = true },
-                            Modifier.fillMaxWidth(0.7f),
-                        )
-                    },
-                )
+                EmptyConfigs(onCreate = { vm.startNew(); showEditor = true })
             } else {
                 LazyColumn(
                     contentPadding = PaddingValues(
-                        start = Dim.edge, end = Dim.edge, top = 4.dp, bottom = Dim.edge
+                        start = AppConstants.SCREEN_EDGE_PADDING,
+                        end = AppConstants.SCREEN_EDGE_PADDING,
+                        top = 12.dp,
+                        bottom = 12.dp,
                     ),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     items(state.configs, key = { it.id }) { cfg ->
-                        ConfigRowItem(
+                        ConfigCardItem(
                             cfg = cfg,
                             onEdit = { vm.edit(cfg); showEditor = true },
                             onRename = { renaming = cfg },
@@ -202,7 +191,29 @@ fun ConfigScreen(
 }
 
 @Composable
-private fun ConfigRowItem(
+private fun EmptyConfigs(onCreate: () -> Unit) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Text("还没有配置", style = MaterialTheme.typography.titleMedium)
+        Gap(6.dp)
+        Text(
+            "一套配置 = 若干条 smali 调用 + 一个 payload dex。\n建好后，注入时直接选用。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
+        Gap(16.dp)
+        Button(onClick = onCreate) { Text("新建配置") }
+    }
+}
+
+@Composable
+private fun ConfigCardItem(
     cfg: ConfigStore.Config,
     onEdit: () -> Unit,
     onRename: () -> Unit,
@@ -211,76 +222,101 @@ private fun ConfigRowItem(
 ) {
     var menu by remember { mutableStateOf(false) }
 
-    Box {
-        ForgeCard(Modifier.pressBounce(onClick = onEdit)) {
-            Column(Modifier.padding(15.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        cfg.name,
-                        style = Forge.Type.title,
-                        color = Forge.Colors.text,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Box(
-                        Modifier
-                            .clip(Forge.Shape.chip)
-                            .pressBounce { menu = true }
-                            .padding(horizontal = 10.dp, vertical = 3.dp)
-                    ) {
-                        Text("⋯", style = Forge.Type.caption, color = Forge.Colors.textFaint)
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    cfg.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(vertical = 2.dp),
+                )
+                Box {
+                    IconButton(onClick = { menu = true }) {
+                        Icon(
+                            Icons.Filled.MoreVert,
+                            contentDescription = "更多操作",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                }
-
-                val firstCall = cfg.calls.lineSequence()
-                    .map { it.trim() }
-                    .firstOrNull { it.isNotBlank() && !it.startsWith("#") }
-                if (firstCall != null) {
-                    VGap(7.dp)
-                    Text(
-                        firstCall,
-                        style = Forge.Type.microMono,
-                        color = Forge.Colors.textDim,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-
-                VGap(11.dp)
-                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    ForgeChip(
-                        text = "${cfg.callCount} 条",
-                        selected = false,
-                        onClick = onEdit,
-                    )
-                    ForgeChip(
-                        text = cfg.targetMethod,
-                        selected = false,
-                        onClick = onEdit,
-                    )
-                    if (cfg.hasDex) {
-                        ForgeStatus("dex ${cfg.dexSizeKb}KB", StatusKind.OK)
-                    } else {
-                        ForgeStatus("无 dex", StatusKind.WARN)
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("编辑") },
+                            onClick = { menu = false; onEdit() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("重命名") },
+                            onClick = { menu = false; onRename() },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("复制一份") },
+                            onClick = { menu = false; onDuplicate() },
+                        )
+                        DropdownMenuItem(
+                            text = {
+                                Text("删除", color = MaterialTheme.colorScheme.error)
+                            },
+                            onClick = { menu = false; onDelete() },
+                        )
                     }
                 }
             }
-        }
 
-        ForgePopup(expanded = menu, onDismiss = { menu = false }) {
-            ForgePopupItem("编辑", onClick = { menu = false; onEdit() })
-            ForgePopupItem("重命名", onClick = { menu = false; onRename() })
-            ForgePopupItem("复制一份", onClick = { menu = false; onDuplicate() })
-            ForgePopupItem(
-                title = "删除",
-                subtitle = "不可恢复",
-                badge = "危险",
-                badgeColor = Forge.Colors.danger,
-                destructive = true,
-                onClick = { menu = false; onDelete() },
-            )
+            val firstCall = cfg.calls.lineSequence()
+                .map { it.trim() }
+                .firstOrNull { it.isNotBlank() && !it.startsWith("#") }
+            if (firstCall != null) {
+                Text(
+                    firstCall,
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            Gap(8.dp)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                InfoPill("${cfg.callCount} 条")
+                InfoPill(cfg.targetMethod)
+                InfoPill(
+                    if (cfg.hasDex) "dex ${cfg.dexSizeKb}KB" else "无 dex",
+                    warn = !cfg.hasDex,
+                )
+            }
         }
+    }
+}
+
+@Composable
+private fun InfoPill(text: String, warn: Boolean = false) {
+    Surface(
+        shape = RoundedCornerShape(100.dp),
+        color = if (warn) {
+            MaterialTheme.colorScheme.tertiaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceContainerHighest
+        },
+    ) {
+        Text(
+            text,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (warn) MaterialTheme.colorScheme.onTertiaryContainer
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 9.dp, vertical = 3.dp),
+        )
     }
 }
 
@@ -298,95 +334,178 @@ private fun ConfigEditor(
     LazyColumn(
         Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
-            start = Dim.edge, end = Dim.edge, top = 4.dp, bottom = 44.dp
+            start = AppConstants.SCREEN_EDGE_PADDING,
+            end = AppConstants.SCREEN_EDGE_PADDING,
+            top = 12.dp,
+            bottom = 12.dp,
         ),
-        verticalArrangement = Arrangement.spacedBy(Dim.sectionGap),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item {
-            LabeledField("名称") {
-                ForgeField(
+            EditorCard("名称") {
+                ToolSingleLineInput(
                     value = state.name,
                     onValueChange = onName,
+                    label = "配置名",
                     placeholder = "给这套配置起个名字",
                 )
             }
         }
 
         item {
-            Column {
-                SectionLabel("调用行", trailing = "${state.callCount} 条")
-                VGap(10.dp)
-                ForgeCodeField(
+            EditorCard("调用行", "${state.callCount} 条") {
+                ToolInputField(
                     value = state.calls,
                     onValueChange = onCalls,
+                    label = "调用行",
                     placeholder = "invoke-static {p0}, Lcom/foo/Bar;->init(Landroid/app/Activity;)V",
                     isError = state.callErrors.isNotEmpty(),
-                    minHeight = 148.dp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(180.dp),
                 )
                 if (state.callErrors.isNotEmpty()) {
-                    VGap(8.dp)
+                    Gap(6.dp)
                     state.callErrors.forEach {
-                        Text(it, style = Forge.Type.microMono, color = Forge.Colors.danger)
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
                     }
                 }
-                VGap(10.dp)
+                Gap(8.dp)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         "一行一条，从 MT / baksmali 粘贴",
-                        style = Forge.Type.caption,
-                        color = Forge.Colors.textFaint,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f),
                     )
-                    ForgeSmallButton("载入示例", onSample)
+                    TextButton(onClick = onSample) { Text("载入示例") }
                 }
             }
         }
 
         item {
-            Column {
-                SectionLabel("注入到")
-                VGap(10.dp)
+            EditorCard("注入到") {
                 val isStandard = LifecyclePoints.ACTIVITY.any { it.name == state.targetMethod }
-                ForgeChipFlow(items = LifecyclePoints.ACTIVITY, perRow = 3) { p ->
-                    ForgeChip(
-                        text = p.name,
-                        selected = p.name == state.targetMethod,
-                        onClick = { onPoint(p) },
-                    )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    LifecyclePoints.ACTIVITY.chunked(3).forEach { row ->
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            row.forEach { p ->
+                                FilterChip(
+                                    selected = p.name == state.targetMethod,
+                                    onClick = { onPoint(p) },
+                                    label = {
+                                        Text(
+                                            p.name,
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontFamily = FontFamily.Monospace,
+                                        )
+                                    },
+                                )
+                            }
+                        }
+                    }
                 }
                 if (!isStandard) {
-                    VGap(9.dp)
-                    ForgeField(
+                    Gap(8.dp)
+                    ToolSingleLineInput(
                         value = state.targetMethod,
                         onValueChange = onMethod,
-                        placeholder = "自定义方法名",
+                        label = "自定义方法名",
+                        placeholder = "方法名",
                     )
                 }
-                VGap(9.dp)
-                KVRow("签名", state.targetSignature)
+                Gap(6.dp)
+                Text(
+                    "签名 ${state.targetSignature}",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
 
         item {
-            Column {
-                SectionLabel("Payload dex")
-                VGap(10.dp)
-                ForgeFileRow(
-                    label = state.dexFile?.name ?: "选择 dex",
-                    detail = if (state.dexExists) {
-                        "${state.dexFile!!.length() / 1024} KB"
-                    } else null,
-                    filled = state.dexExists,
-                    onPick = onPickDex,
-                    onClear = if (state.dexPath != null) onClearDex else null,
-                )
-                VGap(7.dp)
+            EditorCard("Payload dex") {
+                OutlinedCard(
+                    onClick = onPickDex,
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.outlinedCardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Row(
+                        Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                state.dexFile?.name ?: "选择 dex",
+                                style = if (state.dexExists) {
+                                    MaterialTheme.typography.bodyMedium.copy(
+                                        fontFamily = FontFamily.Monospace
+                                    )
+                                } else {
+                                    MaterialTheme.typography.bodyMedium
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            if (state.dexExists) {
+                                Text(
+                                    "${state.dexFile!!.length() / 1024} KB",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                        if (state.dexPath != null) {
+                            TextButton(onClick = onClearDex) { Text("清除") }
+                        } else {
+                            Text(
+                                "选择",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                        }
+                    }
+                }
+                Gap(6.dp)
                 Text(
                     "dex 会复制进 App 私有目录，与原始文件解耦",
-                    style = Forge.Type.caption,
-                    color = Forge.Colors.textFaint,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+
+        item { Spacer(Modifier.height(30.dp)) }
+    }
+}
+
+@Composable
+private fun EditorCard(
+    title: String,
+    trailing: String? = null,
+    content: @Composable () -> Unit,
+) {
+    Card(
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            SectionTitle(title, trailing = trailing)
+            Gap(10.dp)
+            content()
         }
     }
 }
@@ -401,19 +520,18 @@ private fun NameDialog(
     var v by remember { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Forge.Colors.surfaceHigh,
-        title = { Text(title, style = Forge.Type.title, color = Forge.Colors.text) },
-        text = { ForgeField(value = v, onValueChange = { v = it }, placeholder = "名称") },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(v) }) {
-                Text("确定", color = Forge.Colors.accent)
-            }
+        title = { Text(title, style = MaterialTheme.typography.titleMedium) },
+        text = {
+            OutlinedTextField(
+                value = v,
+                onValueChange = { v = it },
+                label = { Text("名称") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("取消", color = Forge.Colors.textDim)
-            }
-        },
+        confirmButton = { TextButton(onClick = { onConfirm(v) }) { Text("确定") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }
 
@@ -427,18 +545,13 @@ private fun ConfirmDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = Forge.Colors.surfaceHigh,
-        title = { Text(title, style = Forge.Type.title, color = Forge.Colors.text) },
-        text = { Text(body, style = Forge.Type.caption, color = Forge.Colors.textDim) },
+        title = { Text(title, style = MaterialTheme.typography.titleMedium) },
+        text = { Text(body, style = MaterialTheme.typography.bodySmall) },
         confirmButton = {
             TextButton(onClick = onConfirm) {
-                Text(confirmText, color = Forge.Colors.danger)
+                Text(confirmText, color = MaterialTheme.colorScheme.error)
             }
         },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("取消", color = Forge.Colors.textDim)
-            }
-        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }

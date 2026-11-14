@@ -1,70 +1,48 @@
 package com.xixin.apkforge.ui
 
-import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.Text
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import com.xixin.apkforge.ui.design.Forge
-import com.xixin.apkforge.ui.design.HairLine
-import com.xixin.apkforge.ui.design.KVRow
-import kotlinx.coroutines.launch
-import com.xixin.apkforge.ui.screen.inject.InjectScreen
-import com.xixin.apkforge.ui.screen.config.ConfigScreen
+import com.xixin.apkforge.ui.lifted.page.AppModalNavigationDrawer
+import com.xixin.apkforge.ui.lifted.page.DrawerFooter
+import com.xixin.apkforge.ui.lifted.page.DrawerHeader
+import com.xixin.apkforge.ui.lifted.page.DrawerMenuItem
 import com.xixin.apkforge.ui.screen.about.AboutScreen
+import com.xixin.apkforge.ui.screen.config.ConfigScreen
+import com.xixin.apkforge.ui.screen.inject.InjectScreen
+import kotlinx.coroutines.launch
 
-/**
- * 应用主框架。
- *
- * 【转场】不用 NavHost 默认的 fade——「淡入淡出」在深色工具类 App 里观感很廉价，
- * 因为它没有方向感。改成**共享轴滑动**（左出右进），符合「钻进下一层」的空间隐喻。
- * 300ms，与 M3e 的 defaultSpatialSpec 同量级。
- */
-enum class AppDest(
-    val route: String,
-    val label: String,
-    val tag: String,
-    val desc: String,
-) {
-    INJECT("inject", "注入", "INJECT", "选 APK，插入调用"),
-    CONFIG("config", "配置", "CONFIG", "管理调用与 dex"),
-    ABOUT("about", "关于", "ABOUT", "原理与限制"),
+/** 侧边栏入口。route 直接用作抽屉的 onMenuClick 参数。 */
+enum class AppDest(val route: String, val label: String, val icon: ImageVector) {
+    INJECT("inject", "注入", Icons.Filled.Build),
+    CONFIG("config", "配置", Icons.Filled.Settings),
+    ABOUT("about", "关于", Icons.Filled.Info),
 }
 
 @Composable
@@ -78,39 +56,34 @@ fun AppRoot() {
         it.route == backStack?.destination?.route
     } ?: AppDest.INJECT
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        scrimColor = Forge.Colors.bg.copy(alpha = 0.82f),
-        drawerContent = {
-            ForgeDrawerSheet(
-                current = current,
-                onSelect = { dest ->
-                    scope.launch { drawerState.close() }
-                    if (dest != current) {
-                        nav.navigate(dest.route) {
-                            popUpTo(AppDest.INJECT.route) { saveState = true }
-                            launchSingleTop = true
-                            restoreState = true
-                        }
-                    }
-                },
-            )
-        },
+    AppModalNavigationDrawer(
+        state = drawerState,
+        drawerContent = { AppDrawerContent(current) { route ->
+            scope.launch { drawerState.close() }
+            val dest = AppDest.entries.firstOrNull { it.route == route } ?: return@AppDrawerContent
+            if (dest != current) {
+                nav.navigate(dest.route) {
+                    popUpTo(AppDest.INJECT.route) { saveState = true }
+                    launchSingleTop = true
+                    restoreState = true
+                }
+            }
+        } },
     ) {
         NavHost(
             navController = nav,
             startDestination = AppDest.INJECT.route,
             enterTransition = {
-                slideInHorizontally(tween(300)) { it / 6 } + fadeIn(tween(300))
+                slideInHorizontally(tween(300)) { it / 8 } + fadeIn(tween(300))
             },
             exitTransition = {
-                slideOutHorizontally(tween(300)) { -it / 12 } + fadeOut(tween(220))
+                slideOutHorizontally(tween(250)) { -it / 16 } + fadeOut(tween(250))
             },
             popEnterTransition = {
-                slideInHorizontally(tween(300)) { -it / 6 } + fadeIn(tween(300))
+                slideInHorizontally(tween(300)) { -it / 8 } + fadeIn(tween(300))
             },
             popExitTransition = {
-                slideOutHorizontally(tween(300)) { it / 12 } + fadeOut(tween(220))
+                slideOutHorizontally(tween(250)) { it / 16 } + fadeOut(tween(250))
             },
         ) {
             composable(AppDest.INJECT.route) {
@@ -120,9 +93,7 @@ fun AppRoot() {
                 )
             }
             composable(AppDest.CONFIG.route) {
-                ConfigScreen(
-                    onOpenDrawer = { scope.launch { drawerState.open() } },
-                )
+                ConfigScreen(onOpenDrawer = { scope.launch { drawerState.open() } })
             }
             composable(AppDest.ABOUT.route) {
                 AboutScreen(
@@ -134,102 +105,40 @@ fun AppRoot() {
     }
 }
 
+/**
+ * 抽屉内容。
+ *
+ * 标题与菜单项用搬运来的 [DrawerHeader] / [DrawerMenuItem]，
+ * 底部信息区是本工程自己的内容（jian_box 那里是「任务中心/下载管理/设置」）。
+ */
 @Composable
-private fun ForgeDrawerSheet(current: AppDest, onSelect: (AppDest) -> Unit) {
-    ModalDrawerSheet(
-        drawerContainerColor = Forge.Colors.surface,
-        modifier = Modifier.width(292.dp),
-    ) {
-        // 品牌区：大字号 + 一行等宽副标题
-        Column(Modifier.padding(horizontal = 24.dp, vertical = 34.dp)) {
-            Text(
-                "APKFORGE",
-                style = Forge.Type.display,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.5.sp,
-                color = Forge.Colors.text,
-            )
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "local dex injector",
-                style = Forge.Type.microMono,
-                color = Forge.Colors.accent.copy(alpha = 0.8f),
-            )
-        }
+fun AppDrawerContent(current: AppDest, onMenuClick: (String) -> Unit) {
+    Box(Modifier.fillMaxHeight()) {
+        Column(
+            Modifier
+                .fillMaxHeight()
+                .windowInsetsPadding(WindowInsets.statusBars)
+        ) {
+            DrawerHeader("ApkForge", "本地 dex 注入")
 
-        HairLine()
-
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 14.dp)) {
             AppDest.entries.forEach { dest ->
-                DrawerItem(
-                    dest = dest,
-                    active = dest == current,
-                    onClick = { onSelect(dest) },
+                DrawerMenuItem(
+                    icon = dest.icon,
+                    label = dest.label,
+                    onClick = { onMenuClick(dest.route) },
+                    selected = dest == current,
                 )
             }
-        }
 
-        Spacer(Modifier.weight(1f))
-        HairLine()
-
-        Column(Modifier.padding(24.dp)) {
-            KVRow("Dex 引擎", "dexlib2 3.0.10")
-            KVRow("签名", "不处理")
-            Spacer(Modifier.height(10.dp))
-            Text(
-                "所有处理在本机完成",
-                style = Forge.Type.caption,
-                color = Forge.Colors.textFaint,
-            )
-        }
-    }
-}
-
-@Composable
-private fun DrawerItem(dest: AppDest, active: Boolean, onClick: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 3.dp)
-            .clip(Forge.Shape.card)
-            .background(if (active) Forge.Colors.surfaceHigh else Forge.Colors.surface)
-            .border(
-                1.dp,
-                if (active) Forge.Colors.accent.copy(alpha = 0.3f) else Forge.Colors.bg,
-                Forge.Shape.card,
-            )
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 15.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        // 标签用全大写大字号，不用图标 —— 图标在这个密度下只是噪音
-        Column(Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    dest.label,
-                    style = Forge.Type.title,
-                    color = if (active) Forge.Colors.accent else Forge.Colors.text,
-                )
-                Spacer(Modifier.width(9.dp))
-                Text(
-                    dest.tag,
-                    style = Forge.Type.label,
-                    color = Forge.Colors.textFaint,
+            Spacer(Modifier.weight(1f))
+            Box(Modifier.windowInsetsPadding(WindowInsets.navigationBars)) {
+                DrawerFooter(
+                    listOf(
+                        "dex 引擎 smali-dexlib2",
+                        "不重签名 · 本机处理",
+                    )
                 )
             }
-            Spacer(Modifier.height(2.dp))
-            Text(
-                dest.desc,
-                style = Forge.Type.caption,
-                color = Forge.Colors.textFaint,
-            )
-        }
-        if (active) {
-            Box(
-                Modifier
-                    .size(6.dp)
-                    .background(Forge.Colors.accent, Forge.Shape.pill)
-            )
         }
     }
 }
