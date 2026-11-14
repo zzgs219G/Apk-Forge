@@ -1,0 +1,45 @@
+# 单元测试门禁 —— 被 .cnb.yml 顶层 include 引用
+#
+# ## 测什么
+# 全部是纯 JVM 单测，无真机依赖（注入核心刻意不引 Android API）。
+# 用本工程自己的 debug APK 当靶子，覆盖：
+#   core/apk/InjectEndToEndTest   4 例  注入后 Manifest 逐字节不变、产物 dex 可解析、
+#                                      指令在方法头、新建方法补 super、多行顺序保持
+#   core/dex/ClassInspectorTest  4 例  方法探测、生命周期签名一致性、类不存在时的行为
+#   core/dex/SamplePayloadTest   2 例  示例 dex 与 UI 预填调用行一致
+#
+# ## 触发方式：手动（web_trigger_test）
+# 早先 jian_box 配的是 `dev: push:`，每次推 dev 都跑一遍。30 天 200 次提交，
+# 其中大量是改文档/改 CI 配置，跑一次要拉 Android SDK 镜像 + 跑全部用例，
+# 纯粹在烧流水线额度。改为手动按钮后 push 零消耗。
+#
+# 注意：手动触发同样会消耗额度，只是"由你决定何时花"。
+#
+# ## 堆大小
+# testOptions 里配了 2048MB —— 端到端测试要加载 37MB 的真实 APK 并重写 dex，
+# 默认 512MB 会 OOM。这里再显式给一次，双保险。
+
+dev:
+  # ⚠️ 事件名必须与按钮一一对应，不能共用
+  # 所有按钮若都用 `event: web_trigger`，点任何一个按钮都会把
+  # `web_trigger` 事件下的**全部** pipeline 跑一遍。
+  web_trigger_test:
+  - name: 单元测试
+    docker:
+      image: mobiledevops/android-sdk-image:34.0.1
+    stages:
+    - name: 生成示例 payload dex
+      script: "set -e\n# SamplePayloadTest 要校验 assets 里的 dex 与预填调用行一致，\n# 而 assets 的 dex 是构建产物，必须先生成。\nSDK=\"${ANDROID_HOME:-$ANDROID_SDK_ROOT}\"\nANDROID_SDK=\"$SDK\" ANDROID_JAR=\"$SDK/platforms/android-37/android.jar\" D8=\"$SDK/build-tools/37.0.0/d8\" bash tools/sample-payload/build.sh\n"
+    - name: 执行单元测试
+      script: "set -e\nexport LANG=C.UTF-8 LC_ALL=C.UTF-8\n# 先 assembleDebug 造出靶子 APK，再跑测试（测试的默认靶子就是它）\n./gradlew assembleDebug testDebugUnitTest \\\n  -Dorg.gradle.jvmargs=\"-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8\" \\\n  --configuration-cache --stacktrace --console=plain 2>&1 | tee build-log/test.log\n"
+    - name: 收集测试报告
+      if: always()
+      script: "mkdir -p build-log\ncp -r app/build/reports/tests build-log/ 2>/dev/null || true\ncp -r app/build/test-results build-log/ 2>/dev/null || true\nls -R build-log/ | head -40\n"
+    - name: 上传测试报告
+      if: always()
+      image: cnbcool/attachments:latest
+      settings:
+        type: UPLOAD
+        attachments:
+        - build-log/
+        ttl: 7

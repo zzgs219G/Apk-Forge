@@ -1,0 +1,36 @@
+# ApkForge CI 主配置
+#
+# 本文件只保留 include 引用，具体流程在同目录文件里：
+#   .cnb/pipeline-package.yml   打包流水线（网页按钮 / API / 打标签 共用）
+#   .cnb/pipeline-test.yml      单元测试（**手动按钮**，不随 push 触发）
+#   .cnb/pipeline-pr.yml        PR 编译门禁（改代码时自动跑，只编译不打包）
+#   .cnb/web_trigger.yml        网页触发按钮的表单定义（平台约定目录）
+#
+# 为什么拆分：打包流程稳定、极少改；测试与门禁是另一类关注点。
+# 混在一个 300 行文件里，改门禁时容易误伤打包逻辑。
+#
+# ⚠️ include 语义（官方文档 §include）：
+#    · 只能作为**顶层键**，不能写在某个 job 内部；
+#    · 顶层键合并：对象合并（同名覆盖）、数组追加；
+#    · YAML 锚点（& / *）**不跨文件展开**（include 发生在解析后的合并阶段）。
+#   因此被引用文件必须自带完整事件结构（dev / v*）。
+#
+# ⚠️ 顶层键是**分支名**，不是事件名：
+#    `dev: push:` 表示"dev 分支上的 push 事件"。写成 `push: push:` 等于
+#    "名为 push 的分支"，永不命中。
+#
+# ⚠️ 不要给 push 配流水线（沿用 jian_box 2026-10 的结论）：
+#    单元测试若配 `dev: push:`，30 天 200 次提交每次都拉 Android SDK 镜像，
+#    其中大量提交只改文档/CI 配置，纯烧流水线额度。
+#    现改为手动按钮：需要验证时点一下，平时 push 零消耗。
+#
+# 合并后的触发矩阵（改配置后可对照检查）：
+#    [dev]      pull_request PR 编译门禁（仅改 app/、gradle 配置时）← 自动
+#    [dev]      web_trigger       云端打包 APK   ← 手动按钮
+#    [dev]      web_trigger_test  单元测试        ← 手动按钮
+#    [dev]      api_trigger       API 打包
+#    [v*]       tag_push          标签发布 · 自动正式版
+include:
+  - .cnb/pipeline-package.yml
+  - .cnb/pipeline-test.yml
+  - .cnb/pipeline-pr.yml

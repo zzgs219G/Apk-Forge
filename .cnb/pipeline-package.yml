@@ -1,0 +1,130 @@
+# 打包流水线 —— 被 .cnb.yml 顶层 include 引用
+#
+# ## 为什么这个文件里出现两个入口
+# CNB 的 include 是「YAML 解析后按顶层键合并」：
+#   · 对象 + 对象 → 合并键，同名覆盖
+#   · 数组 + 数组 → 追加元素
+# 所以被引用文件必须自带触发入口结构（dev / v*），
+# 只写裸 pipeline（docker + stages）无法自动挂到某个事件上。
+#
+# ## 版本号：从 version.properties 读，不做分支回写
+# jian_box 用专门的 version 分支做单一数据源 + 递增回写，那是多人协作
+# 下的严谨方案。ApkForge 单人开发，版本号直接读仓库根目录的
+# version.properties（本地 IDE 构建的兜底默认值也在这里），
+# 打标签时优先从标签解析。不引入额外分支。
+#
+# 分工：
+#   dev.web_trigger   网页手动按钮「云端打包 APK」（表单见 .cnb/web_trigger.yml）
+#   dev.api_trigger   API / 本地触发（cnb CLI、OpenAPI StartBuild）
+#   v*.tag_push       推送 v* 标签自动打正式版（版本号从标签解析）
+
+dev:
+  web_trigger:
+  - name: 云端打包 APK
+    docker:
+      image: mobiledevops/android-sdk-image:34.0.1
+    stages:
+    - name: 计算版本号
+      script: "set -e\nsh .cnb/scripts/resolve-version.sh\n"
+    - name: 生成示例 payload dex
+      script: "set -e\n# assets/sample/DemoDialog.dex 是「载入示例」功能的依赖，\n# 它是构建产物而非源文件，CI 上必须重新生成。\nSDK=\"${ANDROID_HOME:-$ANDROID_SDK_ROOT}\"\necho \"SDK=$SDK\"\nANDROID_SDK=\"$SDK\" \\\nANDROID_JAR=\"$SDK/platforms/android-37/android.jar\" \\\nD8=\"$SDK/build-tools/37.0.0/d8\" \\\nbash tools/sample-payload/build.sh\nls -la app/src/main/assets/sample/\n# 魔数校验：不是合法 dex 当场失败，别等运行时才发现示例用不了\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || {\n  echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
+    - name: 确定打包类型
+      script: "if [ \"$CNB_IS_TAG\" = \"true\" ]; then\n  GRADLE_TASK=\"assembleRelease\"\n  PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"正式版(release)\" ]; then\n  GRADLE_TASK=\"assembleRelease\"\n  PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"全部(both)\" ]; then\n  GRADLE_TASK=\"assembleDebug assembleRelease\"\n  PKG_TYPE=\"全部\"\nelse\n  GRADLE_TASK=\"assembleDebug\"\n  PKG_TYPE=\"测试版\"\nfi\necho \"GRADLE_TASK='$GRADLE_TASK'\" >> /tmp/cnb/vars.sh\necho \"PKG_TYPE='$PKG_TYPE'\" >> /tmp/cnb/vars.sh\necho \"打包类型=$PKG_TYPE 任务=$GRADLE_TASK\"\n"
+    - name: 准备签名配置
+      script: "if [ -n \"$KEYSTORE_BASE64\" ]; then\n  echo \"$KEYSTORE_BASE64\" | base64 -d > release.keystore\n  {\n    echo \"storeFile=release.keystore\"\n    echo \"storePassword=$KEYSTORE_STORE_PASSWORD\"\n    echo \"keyAlias=$KEYSTORE_KEY_ALIAS\"\n    echo \"keyPassword=$KEYSTORE_KEY_PASSWORD\"\n  } > release.properties\n  echo \"✔ 已使用 Secrets 中的签名密钥\"\nelse\n  echo \"⚠ 未配置 KEYSTORE_BASE64，正式版将不签名\"\nfi\n"
+    - name: 执行打包
+      script: "sh .cnb/scripts/gradle-build.sh\n"
+    - name: 整理 APK
+      script: ". /tmp/cnb/vars.sh\nset -e\ncase \"$GRADLE_TASK\" in\n  assembleRelease)\n    APK_DIRS=\"app/build/outputs/apk/release\" ;;\n  \"assembleDebug assembleRelease\")\n    APK_DIRS=\"app/build/outputs/apk/release app/build/outputs/apk/debug\" ;;\n  *)\n    APK_DIRS=\"app/build/outputs/apk/debug\" ;;\nesac\necho \"查找 APK，目录：$APK_DIRS\"\nfind app/build/outputs -name \"*.apk\" 2>/dev/null || echo \"没找到 APK\"\nmkdir -p dist\nSHA=$(git rev-parse --short HEAD)\nDATE=$(date +%Y%m%d-%H%M)\nCOUNT=0\nfor APK_DIR in $APK_DIRS; do\n  case \"$APK_DIR\" in\n    *release*) TYPE=\"正式版\" ;;\n    *) TYPE=\"测试版\" ;;\n  esac\n  for f in \"$APK_DIR\"/*.apk; do\n    [ -e \"$f\" ] || continue\n    cp \"$f\" \"dist/ApkForge-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"\n    echo \"✔ dist/ApkForge-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"\n    COUNT=$((COUNT+1))\n  done\ndone\nif [ \"$COUNT\" -eq 0 ]; then\n  echo \"❌ 没有 APK 产出\"; exit 1\nfi\nsha256sum dist/*.apk > dist/checksums.txt\nls -lh dist/\n"
+    - name: 上传 APK 到附件
+      image: cnbcool/attachments:latest
+      settings:
+        type: UPLOAD
+        attachments:
+        - dist/*.apk
+        - dist/checksums.txt
+        ttl: 7
+    - name: 收集构建日志
+      if: always()
+      script: "mkdir -p build-log/daemon\ncp -f \"$HOME\"/.gradle/daemon/*/*.out.log build-log/daemon/ 2>/dev/null || true\n{\n  echo \"# Gradle 守护进程日志\"\n  for f in build-log/daemon/*.out.log; do\n    [ -e \"$f\" ] || continue\n    echo \"===== $(basename \"$f\") =====\"\n    tail -n 2000 \"$f\"\n  done\n} > build-log/gradle-daemon.log 2>/dev/null || true\n[ -s build-log/gradle-daemon.log ] || echo \"本次构建未产生 Gradle 守护进程日志\" > build-log/gradle-daemon.log\nls -lh build-log/ || true\n"
+    - name: 上传构建日志到附件
+      if: always()
+      image: cnbcool/attachments:latest
+      settings:
+        type: UPLOAD
+        attachments:
+        - build-log/*.log
+        ttl: 7
+  api_trigger:
+  - name: API 打包
+    docker:
+      image: mobiledevops/android-sdk-image:34.0.1
+    stages:
+    - name: 计算版本号
+      script: "set -e\nsh .cnb/scripts/resolve-version.sh\n"
+    - name: 生成示例 payload dex
+      script: "set -e\nSDK=\"${ANDROID_HOME:-$ANDROID_SDK_ROOT}\"\nANDROID_SDK=\"$SDK\" ANDROID_JAR=\"$SDK/platforms/android-37/android.jar\" D8=\"$SDK/build-tools/37.0.0/d8\" bash tools/sample-payload/build.sh\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || { echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
+    - name: 确定打包类型
+      script: "if [ \"$CNB_IS_TAG\" = \"true\" ]; then\n  GRADLE_TASK=\"assembleRelease\"; PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"正式版(release)\" ]; then\n  GRADLE_TASK=\"assembleRelease\"; PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"全部(both)\" ]; then\n  GRADLE_TASK=\"assembleDebug assembleRelease\"; PKG_TYPE=\"全部\"\nelse\n  GRADLE_TASK=\"assembleDebug\"; PKG_TYPE=\"测试版\"\nfi\necho \"GRADLE_TASK='$GRADLE_TASK'\" >> /tmp/cnb/vars.sh\necho \"PKG_TYPE='$PKG_TYPE'\" >> /tmp/cnb/vars.sh\n"
+    - name: 准备签名配置
+      script: "if [ -n \"$KEYSTORE_BASE64\" ]; then\n  echo \"$KEYSTORE_BASE64\" | base64 -d > release.keystore\n  { echo \"storeFile=release.keystore\"; echo \"storePassword=$KEYSTORE_STORE_PASSWORD\"; echo \"keyAlias=$KEYSTORE_KEY_ALIAS\"; echo \"keyPassword=$KEYSTORE_KEY_PASSWORD\"; } > release.properties\nfi\n"
+    - name: 执行打包
+      script: "sh .cnb/scripts/gradle-build.sh\n"
+    - name: 整理 APK
+      script: ". /tmp/cnb/vars.sh\nset -e\ncase \"$GRADLE_TASK\" in\n  assembleRelease) APK_DIRS=\"app/build/outputs/apk/release\" ;;\n  \"assembleDebug assembleRelease\") APK_DIRS=\"app/build/outputs/apk/release app/build/outputs/apk/debug\" ;;\n  *) APK_DIRS=\"app/build/outputs/apk/debug\" ;;\nesac\nmkdir -p dist\nSHA=$(git rev-parse --short HEAD); DATE=$(date +%Y%m%d-%H%M); COUNT=0\nfor APK_DIR in $APK_DIRS; do\n  case \"$APK_DIR\" in *release*) TYPE=\"正式版\" ;; *) TYPE=\"测试版\" ;; esac\n  for f in \"$APK_DIR\"/*.apk; do\n    [ -e \"$f\" ] || continue\n    cp \"$f\" \"dist/ApkForge-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"; COUNT=$((COUNT+1))\n  done\ndone\n[ \"$COUNT\" -gt 0 ] || { echo \"❌ 没有 APK 产出\"; exit 1; }\nsha256sum dist/*.apk > dist/checksums.txt\nls -lh dist/\n"
+    - name: 上传 APK 到附件
+      image: cnbcool/attachments:latest
+      settings:
+        type: UPLOAD
+        attachments:
+        - dist/*.apk
+        - dist/checksums.txt
+        ttl: 7
+    - name: 收集构建日志
+      if: always()
+      script: "mkdir -p build-log/daemon\ncp -f \"$HOME\"/.gradle/daemon/*/*.out.log build-log/daemon/ 2>/dev/null || true\n{ echo \"# Gradle 守护进程日志\"; for f in build-log/daemon/*.out.log; do [ -e \"$f\" ] || continue; echo \"===== $(basename \"$f\") =====\"; tail -n 2000 \"$f\"; done; } > build-log/gradle-daemon.log 2>/dev/null || true\n[ -s build-log/gradle-daemon.log ] || echo \"无 daemon 日志\" > build-log/gradle-daemon.log\n"
+    - name: 上传构建日志到附件
+      if: always()
+      image: cnbcool/attachments:latest
+      settings:
+        type: UPLOAD
+        attachments:
+        - build-log/*.log
+        ttl: 7
+v*:
+  tag_push:
+  - name: 标签发布 · 自动正式版
+    docker:
+      image: mobiledevops/android-sdk-image:34.0.1
+    stages:
+    - name: 计算版本号
+      script: "set -e\nsh .cnb/scripts/resolve-version.sh\n"
+    - name: 生成示例 payload dex
+      script: "set -e\nSDK=\"${ANDROID_HOME:-$ANDROID_SDK_ROOT}\"\nANDROID_SDK=\"$SDK\" ANDROID_JAR=\"$SDK/platforms/android-37/android.jar\" D8=\"$SDK/build-tools/37.0.0/d8\" bash tools/sample-payload/build.sh\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || { echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
+    - name: 确定打包类型
+      script: "GRADLE_TASK=\"assembleRelease\"; PKG_TYPE=\"正式版\"\necho \"GRADLE_TASK='$GRADLE_TASK'\" >> /tmp/cnb/vars.sh\necho \"PKG_TYPE='$PKG_TYPE'\" >> /tmp/cnb/vars.sh\n"
+    - name: 准备签名配置
+      script: "if [ -n \"$KEYSTORE_BASE64\" ]; then\n  echo \"$KEYSTORE_BASE64\" | base64 -d > release.keystore\n  { echo \"storeFile=release.keystore\"; echo \"storePassword=$KEYSTORE_STORE_PASSWORD\"; echo \"keyAlias=$KEYSTORE_KEY_ALIAS\"; echo \"keyPassword=$KEYSTORE_KEY_PASSWORD\"; } > release.properties\n  echo \"✔ 已使用 Secrets 中的签名密钥\"\nelse\n  echo \"❌ 标签发布必须配置 KEYSTORE_BASE64，否则无法签名\"; exit 1\nfi\n"
+    - name: 执行打包
+      script: "sh .cnb/scripts/gradle-build.sh\n"
+    - name: 整理 APK
+      script: ". /tmp/cnb/vars.sh\nset -e\nmkdir -p dist\nSHA=$(git rev-parse --short HEAD); DATE=$(date +%Y%m%d-%H%M)\ncp app/build/outputs/apk/release/*.apk \"dist/ApkForge-正式版-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"\nsha256sum dist/*.apk > dist/checksums.txt\nls -lh dist/\n"
+    - name: 上传 APK 到附件
+      image: cnbcool/attachments:latest
+      settings:
+        type: UPLOAD
+        attachments:
+        - dist/*.apk
+        - dist/checksums.txt
+        ttl: 7
+    - name: 收集构建日志
+      if: always()
+      script: "mkdir -p build-log/daemon\ncp -f \"$HOME\"/.gradle/daemon/*/*.out.log build-log/daemon/ 2>/dev/null || true\n{ echo \"# Gradle 守护进程日志\"; for f in build-log/daemon/*.out.log; do [ -e \"$f\" ] || continue; echo \"===== $(basename \"$f\") =====\"; tail -n 2000 \"$f\"; done; } > build-log/gradle-daemon.log 2>/dev/null || true\n[ -s build-log/gradle-daemon.log ] || echo \"无 daemon 日志\" > build-log/gradle-daemon.log\n"
+    - name: 上传构建日志到附件
+      if: always()
+      image: cnbcool/attachments:latest
+      settings:
+        type: UPLOAD
+        attachments:
+        - build-log/*.log
+        ttl: 7

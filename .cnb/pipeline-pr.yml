@@ -1,0 +1,42 @@
+# PR 编译门禁 —— 被 .cnb.yml 顶层 include 引用
+#
+# ## 作用
+# 改代码时自动跑一次「能不能编译」，只编译不打包。
+# 目的是在 review 之前就把 `@Composable invocations can only happen...`
+# 这类编译错误挡住，不让它流到打包阶段才暴露。
+#
+# ## 为什么只编译不打包
+# 打包要跑 dexlib2 全流程 + 签名，几分钟；编译只要 30 秒级。
+# PR 阶段要的是「快速反馈能不能过」，不是产物。
+#
+# ## ifModify 的意义
+# 只在这两个路径变更时触发。改 README / 文档 / CI 配置不触发 ——
+# 那些改动不可能引发编译错误，触发就是白烧额度。
+
+dev:
+  pull_request:
+  - name: PR 编译门禁
+    docker:
+      image: mobiledevops/android-sdk-image:34.0.1
+    ifModify:
+    - app/**
+    - gradle/**
+    - build.gradle.kts
+    - settings.gradle.kts
+    - .cnb/**
+    stages:
+    - name: 生成示例 payload dex
+      script: "set -e\nSDK=\"${ANDROID_HOME:-$ANDROID_SDK_ROOT}\"\nANDROID_SDK=\"$SDK\" ANDROID_JAR=\"$SDK/platforms/android-37/android.jar\" D8=\"$SDK/build-tools/37.0.0/d8\" bash tools/sample-payload/build.sh\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || { echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
+    - name: 编译 Debug
+      script: "set -e\nexport LANG=C.UTF-8 LC_ALL=C.UTF-8\n./gradlew assembleDebug \\\n  -Dorg.gradle.jvmargs=\"-Xmx3g -XX:MaxMetaspaceSize=768m -Dfile.encoding=UTF-8\" \\\n  --configuration-cache --stacktrace --console=plain 2>&1 | tee build-log/compile.log\n"
+    - name: 失败时抓关键报错
+      if: failure()
+      script: "mkdir -p build-log\n{\n  echo \"===== Kotlin 编译错误 =====\"\n  grep -nE \"^e: \" build-log/compile.log 2>/dev/null | head -60 || true\n  echo \"\"\n  echo \"===== 根因 =====\"\n  grep -nA8 \"What went wrong:\" build-log/compile.log 2>/dev/null | head -40 || true\n  echo \"\"\n  echo \"===== 依赖解析失败 =====\"\n  grep -nE \"Could not resolve|Failed to resolve|Could not find\" build-log/compile.log 2>/dev/null | head -20 || true\n} | tee build-log/error-summary.txt\n"
+    - name: 上传日志
+      if: always()
+      image: cnbcool/attachments:latest
+      settings:
+        type: UPLOAD
+        attachments:
+        - build-log/
+        ttl: 7

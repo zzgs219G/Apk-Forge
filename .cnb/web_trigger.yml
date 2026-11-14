@@ -1,0 +1,41 @@
+# 网页触发按钮的表单定义（CNB 平台约定目录）
+#
+# ⚠️ 每个按钮的 event 必须指向不同的事件名。
+# 若所有按钮都用 `event: web_trigger`，点任何一个都会把
+# `web_trigger` 下的**全部** pipeline 跑一遍 —— 点「云端打包」会连单元测试一起跑。
+#
+# 对应关系：
+#   「云端打包 APK」→ web_trigger       （pipeline-package.yml）
+#   「单元测试」     → web_trigger_test （pipeline-test.yml）
+
+web_trigger:
+- name: 云端打包 APK
+  type: manual
+  description: 构建 APK 并作为附件上传（默认测试版，可选正式版）
+  event: web_trigger
+  inputs:
+  - name: build_type
+    description: 打包类型
+    type: choice
+    values:
+    - "测试版(debug)"
+    - "正式版(release)"
+    - "全部(both)"
+    default: "测试版(debug)"
+  - name: version_code
+    description: 版本号，选填。整数(如 110)或点分(如 1.1.0)；留空用 version.properties
+    type: string
+    default: ""
+  - name: log_level
+    description: 日志模式
+    type: choice
+    values:
+    - "快速模式"
+    - "详细模式"
+    default: "快速模式"
+
+- name: 单元测试
+  type: manual
+  description: 跑全部纯 JVM 单测（真实 APK 端到端注入验证）
+  event: web_trigger_test
+  inputs: []
