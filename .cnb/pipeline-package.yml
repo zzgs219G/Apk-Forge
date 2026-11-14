@@ -26,16 +26,18 @@ main:
     stages:
     - name: 计算版本号
       script: "set -e\nsh .cnb/scripts/resolve-version.sh\n"
+    - name: 补齐 android-37 平台
+      script: "set -e\n# 镜像 mobiledevops/android-sdk-image:34.0.1 只预装 android-35/36\n# (见其仓库 packages.txt)，而本工程 compileSdk=37，必须补装。\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\necho \"SDK=$SDK\"\nif [ -f \"$SDK/platforms/android-37/android.jar\" ]; then\n  echo \"✔ android-37 已存在，跳过\"\nelse\n  echo \"⬇ 安装 platforms;android-37 + build-tools;37.0.0\"\n  yes | \"$SDK/cmdline-tools/latest/bin/sdkmanager\" --sdk_root=\"$SDK\" \\\n    \"platform-tools\" \"platforms;android-37\" \"build-tools;37.0.0\" || {\n    echo \"❌ sdkmanager 安装失败\"; exit 1; }\nfi\nls -1 \"$SDK/platforms\"\n"
     - name: 生成示例 payload dex
-      script: "set -e\n# assets/sample/DemoDialog.dex 是「载入示例」功能的依赖，\n# 它是构建产物而非源文件，CI 上必须重新生成。\nSDK=\"${ANDROID_HOME:-$ANDROID_SDK_ROOT}\"\necho \"SDK=$SDK\"\nANDROID_SDK=\"$SDK\" \\\nANDROID_JAR=\"$SDK/platforms/android-37/android.jar\" \\\nD8=\"$SDK/build-tools/37.0.0/d8\" \\\nbash tools/sample-payload/build.sh\nls -la app/src/main/assets/sample/\n# 魔数校验：不是合法 dex 当场失败，别等运行时才发现示例用不了\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || {\n  echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
+      script: "set -e\n# assets/sample/DemoDialog.dex 是「载入示例」功能的依赖，\n# 它是构建产物而非源文件，CI 上必须重新生成。\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\necho \"SDK=$SDK\"\nANDROID_SDK=\"$SDK\" \\\nbash tools/sample-payload/build.sh\nls -la app/src/main/assets/sample/\n# 魔数校验：不是合法 dex 当场失败，别等运行时才发现示例用不了\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || {\n  echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
     - name: 确定打包类型
-      script: "if [ \"$CNB_IS_TAG\" = \"true\" ]; then\n  GRADLE_TASK=\"assembleRelease\"\n  PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"正式版(release)\" ]; then\n  GRADLE_TASK=\"assembleRelease\"\n  PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"全部(both)\" ]; then\n  GRADLE_TASK=\"assembleDebug assembleRelease\"\n  PKG_TYPE=\"全部\"\nelse\n  GRADLE_TASK=\"assembleDebug\"\n  PKG_TYPE=\"测试版\"\nfi\necho \"GRADLE_TASK='$GRADLE_TASK'\" >> /tmp/cnb/vars.sh\necho \"PKG_TYPE='$PKG_TYPE'\" >> /tmp/cnb/vars.sh\necho \"打包类型=$PKG_TYPE 任务=$GRADLE_TASK\"\n"
+      script: "if [ \"$CNB_IS_TAG\" = \"true\" ]; then\n  GRADLE_TASK=\"assembleRelease\"\n  PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"正式版(release)\" ]; then\n  GRADLE_TASK=\"assembleRelease\"\n  PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"全部(both)\" ]; then\n  GRADLE_TASK=\"assembleDebug assembleRelease\"\n  PKG_TYPE=\"全部\"\nelse\n  GRADLE_TASK=\"assembleDebug\"\n  PKG_TYPE=\"测试版\"\nfi\nmkdir -p /tmp/cnb\necho \"GRADLE_TASK='$GRADLE_TASK'\" >> /tmp/cnb/vars.sh\necho \"PKG_TYPE='$PKG_TYPE'\" >> /tmp/cnb/vars.sh\necho \"打包类型=$PKG_TYPE 任务=$GRADLE_TASK\"\n"
     - name: 准备签名配置
       script: "if [ -n \"$KEYSTORE_BASE64\" ]; then\n  echo \"$KEYSTORE_BASE64\" | base64 -d > release.keystore\n  {\n    echo \"storeFile=release.keystore\"\n    echo \"storePassword=$KEYSTORE_STORE_PASSWORD\"\n    echo \"keyAlias=$KEYSTORE_KEY_ALIAS\"\n    echo \"keyPassword=$KEYSTORE_KEY_PASSWORD\"\n  } > release.properties\n  echo \"✔ 已使用 Secrets 中的签名密钥\"\nelse\n  echo \"⚠ 未配置 KEYSTORE_BASE64，正式版将不签名\"\nfi\n"
     - name: 执行打包
       script: "sh .cnb/scripts/gradle-build.sh\n"
     - name: 整理 APK
-      script: ". /tmp/cnb/vars.sh\nset -e\ncase \"$GRADLE_TASK\" in\n  assembleRelease)\n    APK_DIRS=\"app/build/outputs/apk/release\" ;;\n  \"assembleDebug assembleRelease\")\n    APK_DIRS=\"app/build/outputs/apk/release app/build/outputs/apk/debug\" ;;\n  *)\n    APK_DIRS=\"app/build/outputs/apk/debug\" ;;\nesac\necho \"查找 APK，目录：$APK_DIRS\"\nfind app/build/outputs -name \"*.apk\" 2>/dev/null || echo \"没找到 APK\"\nmkdir -p dist\nSHA=$(git rev-parse --short HEAD)\nDATE=$(date +%Y%m%d-%H%M)\nCOUNT=0\nfor APK_DIR in $APK_DIRS; do\n  case \"$APK_DIR\" in\n    *release*) TYPE=\"正式版\" ;;\n    *) TYPE=\"测试版\" ;;\n  esac\n  for f in \"$APK_DIR\"/*.apk; do\n    [ -e \"$f\" ] || continue\n    cp \"$f\" \"dist/ApkForge-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"\n    echo \"✔ dist/ApkForge-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"\n    COUNT=$((COUNT+1))\n  done\ndone\nif [ \"$COUNT\" -eq 0 ]; then\n  echo \"❌ 没有 APK 产出\"; exit 1\nfi\nsha256sum dist/*.apk > dist/checksums.txt\nls -lh dist/\n"
+      script: "[ -f /tmp/cnb/vars.sh ] && . /tmp/cnb/vars.sh\nset -e\ncase \"$GRADLE_TASK\" in\n  assembleRelease)\n    APK_DIRS=\"app/build/outputs/apk/release\" ;;\n  \"assembleDebug assembleRelease\")\n    APK_DIRS=\"app/build/outputs/apk/release app/build/outputs/apk/debug\" ;;\n  *)\n    APK_DIRS=\"app/build/outputs/apk/debug\" ;;\nesac\necho \"查找 APK，目录：$APK_DIRS\"\nfind app/build/outputs -name \"*.apk\" 2>/dev/null || echo \"没找到 APK\"\nmkdir -p dist\nSHA=$(git rev-parse --short HEAD)\nDATE=$(date +%Y%m%d-%H%M)\nCOUNT=0\nfor APK_DIR in $APK_DIRS; do\n  case \"$APK_DIR\" in\n    *release*) TYPE=\"正式版\" ;;\n    *) TYPE=\"测试版\" ;;\n  esac\n  for f in \"$APK_DIR\"/*.apk; do\n    [ -e \"$f\" ] || continue\n    cp \"$f\" \"dist/ApkForge-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"\n    echo \"✔ dist/ApkForge-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"\n    COUNT=$((COUNT+1))\n  done\ndone\nif [ \"$COUNT\" -eq 0 ]; then\n  echo \"❌ 没有 APK 产出\"; exit 1\nfi\nsha256sum dist/*.apk > dist/checksums.txt\nls -lh dist/\n"
     - name: 上传 APK 到附件
       image: cnbcool/attachments:latest
       settings:
@@ -62,16 +64,18 @@ main:
     stages:
     - name: 计算版本号
       script: "set -e\nsh .cnb/scripts/resolve-version.sh\n"
+    - name: 补齐 android-37 平台
+      script: "set -e\n# 镜像 mobiledevops/android-sdk-image:34.0.1 只预装 android-35/36\n# (见其仓库 packages.txt)，而本工程 compileSdk=37，必须补装。\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\necho \"SDK=$SDK\"\nif [ -f \"$SDK/platforms/android-37/android.jar\" ]; then\n  echo \"✔ android-37 已存在，跳过\"\nelse\n  echo \"⬇ 安装 platforms;android-37 + build-tools;37.0.0\"\n  yes | \"$SDK/cmdline-tools/latest/bin/sdkmanager\" --sdk_root=\"$SDK\" \\\n    \"platform-tools\" \"platforms;android-37\" \"build-tools;37.0.0\" || {\n    echo \"❌ sdkmanager 安装失败\"; exit 1; }\nfi\nls -1 \"$SDK/platforms\"\n"
     - name: 生成示例 payload dex
-      script: "set -e\nSDK=\"${ANDROID_HOME:-$ANDROID_SDK_ROOT}\"\nANDROID_SDK=\"$SDK\" ANDROID_JAR=\"$SDK/platforms/android-37/android.jar\" D8=\"$SDK/build-tools/37.0.0/d8\" bash tools/sample-payload/build.sh\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || { echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
+      script: "set -e\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\nANDROID_SDK=\"$SDK\" bash tools/sample-payload/build.sh\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || { echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
     - name: 确定打包类型
-      script: "if [ \"$CNB_IS_TAG\" = \"true\" ]; then\n  GRADLE_TASK=\"assembleRelease\"; PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"正式版(release)\" ]; then\n  GRADLE_TASK=\"assembleRelease\"; PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"全部(both)\" ]; then\n  GRADLE_TASK=\"assembleDebug assembleRelease\"; PKG_TYPE=\"全部\"\nelse\n  GRADLE_TASK=\"assembleDebug\"; PKG_TYPE=\"测试版\"\nfi\necho \"GRADLE_TASK='$GRADLE_TASK'\" >> /tmp/cnb/vars.sh\necho \"PKG_TYPE='$PKG_TYPE'\" >> /tmp/cnb/vars.sh\n"
+      script: "if [ \"$CNB_IS_TAG\" = \"true\" ]; then\n  GRADLE_TASK=\"assembleRelease\"; PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"正式版(release)\" ]; then\n  GRADLE_TASK=\"assembleRelease\"; PKG_TYPE=\"正式版\"\nelif [ \"$build_type\" = \"全部(both)\" ]; then\n  GRADLE_TASK=\"assembleDebug assembleRelease\"; PKG_TYPE=\"全部\"\nelse\n  GRADLE_TASK=\"assembleDebug\"; PKG_TYPE=\"测试版\"\nfi\nmkdir -p /tmp/cnb\necho \"GRADLE_TASK='$GRADLE_TASK'\" >> /tmp/cnb/vars.sh\necho \"PKG_TYPE='$PKG_TYPE'\" >> /tmp/cnb/vars.sh\n"
     - name: 准备签名配置
       script: "if [ -n \"$KEYSTORE_BASE64\" ]; then\n  echo \"$KEYSTORE_BASE64\" | base64 -d > release.keystore\n  { echo \"storeFile=release.keystore\"; echo \"storePassword=$KEYSTORE_STORE_PASSWORD\"; echo \"keyAlias=$KEYSTORE_KEY_ALIAS\"; echo \"keyPassword=$KEYSTORE_KEY_PASSWORD\"; } > release.properties\nfi\n"
     - name: 执行打包
       script: "sh .cnb/scripts/gradle-build.sh\n"
     - name: 整理 APK
-      script: ". /tmp/cnb/vars.sh\nset -e\ncase \"$GRADLE_TASK\" in\n  assembleRelease) APK_DIRS=\"app/build/outputs/apk/release\" ;;\n  \"assembleDebug assembleRelease\") APK_DIRS=\"app/build/outputs/apk/release app/build/outputs/apk/debug\" ;;\n  *) APK_DIRS=\"app/build/outputs/apk/debug\" ;;\nesac\nmkdir -p dist\nSHA=$(git rev-parse --short HEAD); DATE=$(date +%Y%m%d-%H%M); COUNT=0\nfor APK_DIR in $APK_DIRS; do\n  case \"$APK_DIR\" in *release*) TYPE=\"正式版\" ;; *) TYPE=\"测试版\" ;; esac\n  for f in \"$APK_DIR\"/*.apk; do\n    [ -e \"$f\" ] || continue\n    cp \"$f\" \"dist/ApkForge-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"; COUNT=$((COUNT+1))\n  done\ndone\n[ \"$COUNT\" -gt 0 ] || { echo \"❌ 没有 APK 产出\"; exit 1; }\nsha256sum dist/*.apk > dist/checksums.txt\nls -lh dist/\n"
+      script: "[ -f /tmp/cnb/vars.sh ] && . /tmp/cnb/vars.sh\nset -e\ncase \"$GRADLE_TASK\" in\n  assembleRelease) APK_DIRS=\"app/build/outputs/apk/release\" ;;\n  \"assembleDebug assembleRelease\") APK_DIRS=\"app/build/outputs/apk/release app/build/outputs/apk/debug\" ;;\n  *) APK_DIRS=\"app/build/outputs/apk/debug\" ;;\nesac\nmkdir -p dist\nSHA=$(git rev-parse --short HEAD); DATE=$(date +%Y%m%d-%H%M); COUNT=0\nfor APK_DIR in $APK_DIRS; do\n  case \"$APK_DIR\" in *release*) TYPE=\"正式版\" ;; *) TYPE=\"测试版\" ;; esac\n  for f in \"$APK_DIR\"/*.apk; do\n    [ -e \"$f\" ] || continue\n    cp \"$f\" \"dist/ApkForge-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"; COUNT=$((COUNT+1))\n  done\ndone\n[ \"$COUNT\" -gt 0 ] || { echo \"❌ 没有 APK 产出\"; exit 1; }\nsha256sum dist/*.apk > dist/checksums.txt\nls -lh dist/\n"
     - name: 上传 APK 到附件
       image: cnbcool/attachments:latest
       settings:
@@ -99,16 +103,18 @@ v*:
     stages:
     - name: 计算版本号
       script: "set -e\nsh .cnb/scripts/resolve-version.sh\n"
+    - name: 补齐 android-37 平台
+      script: "set -e\n# 镜像 mobiledevops/android-sdk-image:34.0.1 只预装 android-35/36\n# (见其仓库 packages.txt)，而本工程 compileSdk=37，必须补装。\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\necho \"SDK=$SDK\"\nif [ -f \"$SDK/platforms/android-37/android.jar\" ]; then\n  echo \"✔ android-37 已存在，跳过\"\nelse\n  echo \"⬇ 安装 platforms;android-37 + build-tools;37.0.0\"\n  yes | \"$SDK/cmdline-tools/latest/bin/sdkmanager\" --sdk_root=\"$SDK\" \\\n    \"platform-tools\" \"platforms;android-37\" \"build-tools;37.0.0\" || {\n    echo \"❌ sdkmanager 安装失败\"; exit 1; }\nfi\nls -1 \"$SDK/platforms\"\n"
     - name: 生成示例 payload dex
-      script: "set -e\nSDK=\"${ANDROID_HOME:-$ANDROID_SDK_ROOT}\"\nANDROID_SDK=\"$SDK\" ANDROID_JAR=\"$SDK/platforms/android-37/android.jar\" D8=\"$SDK/build-tools/37.0.0/d8\" bash tools/sample-payload/build.sh\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || { echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
+      script: "set -e\nSDK=\"${ANDROID_SDK:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}}\"\nANDROID_SDK=\"$SDK\" bash tools/sample-payload/build.sh\nhead -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q \"dex\" || { echo \"❌ 示例 dex 魔数错误\"; exit 1; }\n"
     - name: 确定打包类型
-      script: "GRADLE_TASK=\"assembleRelease\"; PKG_TYPE=\"正式版\"\necho \"GRADLE_TASK='$GRADLE_TASK'\" >> /tmp/cnb/vars.sh\necho \"PKG_TYPE='$PKG_TYPE'\" >> /tmp/cnb/vars.sh\n"
+      script: "GRADLE_TASK=\"assembleRelease\"; PKG_TYPE=\"正式版\"\nmkdir -p /tmp/cnb\necho \"GRADLE_TASK='$GRADLE_TASK'\" >> /tmp/cnb/vars.sh\necho \"PKG_TYPE='$PKG_TYPE'\" >> /tmp/cnb/vars.sh\n"
     - name: 准备签名配置
       script: "if [ -n \"$KEYSTORE_BASE64\" ]; then\n  echo \"$KEYSTORE_BASE64\" | base64 -d > release.keystore\n  { echo \"storeFile=release.keystore\"; echo \"storePassword=$KEYSTORE_STORE_PASSWORD\"; echo \"keyAlias=$KEYSTORE_KEY_ALIAS\"; echo \"keyPassword=$KEYSTORE_KEY_PASSWORD\"; } > release.properties\n  echo \"✔ 已使用 Secrets 中的签名密钥\"\nelse\n  echo \"❌ 标签发布必须配置 KEYSTORE_BASE64，否则无法签名\"; exit 1\nfi\n"
     - name: 执行打包
       script: "sh .cnb/scripts/gradle-build.sh\n"
     - name: 整理 APK
-      script: ". /tmp/cnb/vars.sh\nset -e\nmkdir -p dist\nSHA=$(git rev-parse --short HEAD); DATE=$(date +%Y%m%d-%H%M)\ncp app/build/outputs/apk/release/*.apk \"dist/ApkForge-正式版-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"\nsha256sum dist/*.apk > dist/checksums.txt\nls -lh dist/\n"
+      script: "[ -f /tmp/cnb/vars.sh ] && . /tmp/cnb/vars.sh\nset -e\nmkdir -p dist\nSHA=$(git rev-parse --short HEAD); DATE=$(date +%Y%m%d-%H%M)\ncp app/build/outputs/apk/release/*.apk \"dist/ApkForge-正式版-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"\nsha256sum dist/*.apk > dist/checksums.txt\nls -lh dist/\n"
     - name: 上传 APK 到附件
       image: cnbcool/attachments:latest
       settings:

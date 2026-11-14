@@ -55,7 +55,12 @@ pick_android_jar() {
   echo "$best"
 }
 JAR=$(pick_android_jar)
-[ -n "$JAR" ] && [ -f "$JAR" ] || { echo "❌ 找不到 android.jar（$SDK/platforms/android-*/）" >&2; exit 1; }
+[ -n "$JAR" ] && [ -f "$JAR" ] || {
+  echo "❌ 找不到 android.jar（$SDK/platforms/android-*/）" >&2
+  echo "── $SDK/platforms 实际内容 ──" >&2
+  ls -1 "$SDK/platforms" 2>&1 | head -20 >&2 || echo "  (目录不存在或无权限)" >&2
+  exit 1
+}
 echo "android.jar = $JAR"
 
 # ── d8：取 build-tools 下最高版本 ──
@@ -73,7 +78,12 @@ pick_d8() {
   echo ""
 }
 D8=$(pick_d8)
-[ -n "$D8" ] || { echo "❌ 找不到 d8（$SDK/build-tools/*/）" >&2; exit 1; }
+[ -n "$D8" ] || {
+  echo "❌ 找不到 d8（$SDK/build-tools/*/）" >&2
+  echo "── $SDK/build-tools 实际内容 ──" >&2
+  ls -1 "$SDK/build-tools" 2>&1 | head -20 >&2 || echo "  (目录不存在或无权限)" >&2
+  exit 1
+}
 echo "d8 = $D8"
 
 # ── javac / java：优先 PATH，其次 JDK 常见位置 ──
