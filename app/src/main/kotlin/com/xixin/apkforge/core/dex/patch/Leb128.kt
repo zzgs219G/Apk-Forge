@@ -82,6 +82,27 @@ internal object Leb128 {
         return (if (raw == 0L) -1L else raw - 1) to n
     }
 
+    /** 读 `sleb128`（有符号）。 */
+    fun readSleb128(data: ByteArray, offset: Int): Pair<Long, Int> {
+        var result = 0L
+        var shift = 0
+        var pos = offset
+        var b: Int
+        do {
+            require(pos < data.size) { "sleb128 越界读取：offset=$offset" }
+            b = data[pos].toInt() and 0xFF
+            result = result or ((b and 0x7F).toLong() shl shift)
+            pos++
+            shift += 7
+            require(shift < 70) { "sleb128 过长：offset=$offset" }
+        } while (b and 0x80 != 0)
+        // 符号扩展：最后一个字节的最高有效位是符号位
+        if (shift < 64 && (b and 0x40) != 0) {
+            result = result or (-1L shl shift)
+        }
+        return result to (pos - offset)
+    }
+
     /** 写出 `uleb128p1`。传 -1 表示 null。 */
     fun writeUleb128p1(out: MutableList<Byte>, value: Long) {
         require(value >= -1) { "uleb128p1 最小为 -1（表示 null）：$value" }

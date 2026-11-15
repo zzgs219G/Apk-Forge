@@ -1,5 +1,7 @@
 package com.xixin.apkforge.core.dex.patch
 
+import com.xixin.apkforge.core.dex.DexOpcodes
+
 /**
  * **池注入器**：往 dex 里新增池条目（字符串/类型/原型/方法），只重建索引数组。
  *
@@ -292,6 +294,134 @@ internal object PoolInjector {
                 out.bytes(rewritten)
             }
 
+            // ── 10b-2. 重写注解 ──
+            // 注解里是 type_idx + 元素名的 string_idx + 元素值，池重排后全部错位。
+            // 表现：@kotlin.Metadata 变成 @java.util.Iterator，Kotlin 反射与 Compose 全废。
+            val evMaps = EncodedValueRemapper.Maps(
+                stringMap = stringIndexMap,
+                typeMap = typeIndexMap,
+                fieldMap = fieldIndexMap,
+                methodMap = methodIndexMap,
+                protoMap = protoIndexMap,
+            )
+            val annotationCache = HashMap<Int, Int>()
+            val newAnnotationsOffsets = HashMap<Int, Int>()
+            sec.classDefs.forEach { cd ->
+                if (cd.annotationsOff == 0L) return@forEach
+                val dirOff = cd.annotationsOff.toInt()
+                if (newAnnotationsOffsets.containsKey(dirOff)) return@forEach
+                val bytes = AnnotationRemapper.remapDirectory(
+                    dexBytes, dirOff, evMaps, annotationCache
+                ) { b ->
+                    out.align(4)
+                    val pos = out.position
+                    out.bytes(b)
+                    pos
+                }
+                out.align(4)
+                newAnnotationsOffsets[dirOff] = out.position
+                out.bytes(bytes)
+            }
+
+            // ── 10b-4. 重写 debug_info ──
+            // debug_info 里有局部变量名（string_idx）与类型（type_idx），池重排后错位。
+            // 它只影响崩溃栈的行号与变量名，但会让严格解析器（jadx）整段失败，
+            // 也会让真机上的堆栈信息变成乱码。
+            val debugInfoCache = HashMap<Int, Int>()   // 旧偏移 → 新偏移
+            run {
+                val codeOffs = HashSet<Int>()
+                sec.classDefs.forEach { cd ->
+                    if (cd.classDataOff == 0L) return@forEach
+                    val parsed = runCatching {
+                        ClassDataItem.parse(dexBytes, cd.classDataOff.toInt())
+                    }.getOrNull() ?: return@forEach
+                    parsed.directCodeOffsets.forEach { if (it > 0) codeOffs += it.toInt() }
+                    parsed.virtualCodeOffsets.forEach { if (it > 0) codeOffs += it.toInt() }
+                }
+                codeOffs.forEach { co ->
+                    if (co + DexFormat.CI_INSNS > dexBytes.size) return@forEach
+                    val dbgOff = src.u32AsInt(co + DexFormat.CI_DEBUG_INFO_OFF, "dbg")
+                    if (dbgOff == 0) return@forEach
+                    val newOff = debugInfoCache[dbgOff] ?: run {
+                        val bytes = DebugInfoRemapper.remap(dexBytes, dbgOff, evMaps)
+                        out.align(4)
+                        val pos = out.position
+                        out.bytes(bytes)
+                        debugInfoCache[dbgOff] = pos
+                        pos
+                    }
+                    // code_item 在数据段没搬运，原位改它的 debug_info_off
+                    out.patchU32(co + DexFormat.CI_DEBUG_INFO_OFF, newOff.toLong())
+                }
+            }
+
+            // code_item 的指令区原样保留，但里面的 string_idx 是池下标。
+            // 这里只收集「哪个 code_item 的哪条指令要改」，等指令区都落到输出后
+            // 再统一回填（见 10d）。
+            // ── 10b-3. 收集指令里所有需要重映射的池索引 ──
+            // 用 dexlib2 的 instructionStart（文件绝对偏移）定位，不自己做「宽度表 + code_off」推算
+            // —— 第一版那样做时所有 patch 静默跳过，产物指令全部错位。
+            val dfForInsns = com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile
+                .fromInputStream(DexOpcodes.forBytes(dexBytes), dexBytes.inputStream())
+
+            val strLookup = HashMap<String, Int>(oldStrings.size * 2)
+            oldStrings.forEachIndexed { i, v -> strLookup.putIfAbsent(v, i) }
+            val typeLookupOld = HashMap<String, Int>(oldTypeStrings.size * 2)
+            oldTypeStrings.forEachIndexed { i, sIdx ->
+                typeLookupOld.putIfAbsent(oldStrings[sIdx], i)
+            }
+            val fieldLookup = HashMap<String, Int>(sec.fields.size * 2)
+            sec.fields.forEachIndexed { i, f ->
+                val c = oldStrings[sec.typeDescriptorIndices[f.classIdx]]
+                val n = oldStrings[f.nameIdx]
+                val t = oldStrings[sec.typeDescriptorIndices[f.typeIdx]]
+                fieldLookup.putIfAbsent("$c|$n|$t", i)
+            }
+            val protoLookup = HashMap<String, Int>(sec.protos.size * 2)
+            sec.protos.forEachIndexed { i, pr ->
+                val sig = "(" + pr.paramTypeIdx.joinToString("") {
+                    oldStrings[sec.typeDescriptorIndices[it]]
+                } + ")" + oldStrings[sec.typeDescriptorIndices[pr.returnTypeIdx]]
+                protoLookup.putIfAbsent(sig, i)
+            }
+            val methodLookupInsn = HashMap<String, Int>(90000)
+            run {
+                val mSize = src.u32AsInt(DexFormat.H_METHOD_IDS_SIZE, "mis")
+                val mOff = src.u32AsInt(DexFormat.H_METHOD_IDS_OFF, "mio")
+                for (i in 0 until mSize) {
+                    val o = mOff + i * 8
+                    val cIdx = src.u16(o)
+                    val pIdx = src.u16(o + 2)
+                    if (pIdx >= sec.protos.size || cIdx >= sec.typeDescriptorIndices.size) continue
+                    val nIdx = src.u32AsInt(o + 4, "n")
+                    val c = oldStrings[sec.typeDescriptorIndices[cIdx]]
+                    val n = oldStrings[nIdx]
+                    val pr = sec.protos[pIdx]
+                    val sig = "(" + pr.paramTypeIdx.joinToString("") {
+                        oldStrings[sec.typeDescriptorIndices[it]]
+                    } + ")" + oldStrings[sec.typeDescriptorIndices[pr.returnTypeIdx]]
+                    methodLookupInsn.putIfAbsent("$c|$n|$sig", i)
+                }
+            }
+
+            val insnPatches = InstructionRefRemapper.collect(
+                dfForInsns,
+                stringIdx = { strLookup[it] ?: -1 },
+                typeIdx = { typeLookupOld[it] ?: -1 },
+                fieldIdx = { c, n, t -> fieldLookup["$c|$n|$t"] ?: -1 },
+                methodIdx = { c, n, pp, r ->
+                    methodLookupInsn["$c|$n|(" + pp.joinToString("") + ")" + r] ?: -1
+                },
+                protoIdx = { pp, r -> protoLookup["(" + pp.joinToString("") + ")" + r] ?: -1 },
+            )
+            // 自检：有方法却一条都没收集到，说明定位失败（静默跳过是致命错误）
+            if (insnPatches.isEmpty() && sec.methods.isNotEmpty()) {
+                return Result.Failed(
+                    "指令池引用收集失败（0 条），说明 instructionStart 定位不可用；" +
+                        "若继续将会产出索引全错的 dex。请改用全量写入"
+                )
+            }
+
             // ── 10c. 重写所有 type_list ──
             // proto_ids[i].parameters_off 与 class_def.interfaces_off 都指向 type_list，
             // 而 type_list 里存的是 type_idx（u16）—— type_ids 重排后它们全部失效。
@@ -398,7 +528,11 @@ internal object PoolInjector {
                 } else 0L
                 out.u32(newIfaces)
                 out.u32(if (c.sourceFileIdx < 0) DexFormat.NO_INDEX else c.sourceFileIdx.toLong())
-                out.u32(c.annotationsOff)
+                // annotations_off 指向重写后的 directory
+                val newAnn = if (c.annotationsOff > 0) {
+                    (newAnnotationsOffsets[c.annotationsOff.toInt()] ?: c.annotationsOff.toInt()).toLong()
+                } else 0L
+                out.u32(newAnn)
                 // class_data_off 指向重写后的新位置
                 val newCdo = newClassDataOffsets[c.classDataOff.toInt()]
                     ?: run {
@@ -448,7 +582,9 @@ internal object PoolInjector {
                         // 新增了 type_list（新 proto 的参数表）
                         DexFormat.TYPE_TYPE_LIST ->
                             putMap(type, size + if (newProtoParamsOff != 0L) 1 else 0, offset)
-                        // class_data 全部重写，数量不变但偏移变了（指向新位置）
+                        // class_data / code_item：本次只**重建**已有的，没有新增条目，
+                        // 所以 size 不变。⚠️ 之前在这里写了 size + 1，导致 map 声称有 77 个
+                        // class_data_item 而实际只有 76 个 —— ART 校验器直接判非法。
                         DexFormat.TYPE_CLASS_DATA_ITEM -> {
                             val firstNew = newClassDataOffsets.values.minOrNull() ?: offset
                             putMap(type, size, firstNew)
@@ -474,6 +610,19 @@ internal object PoolInjector {
             }
 
             val finalSize = out.position
+
+            // ── 11b. 回填指令里的池索引 ──
+            // 指令区没有搬运（原样留在原文件区域），所以直接在 out 的原位置改数字。
+            val insnMaps = EncodedValueRemapper.Maps(
+                stringMap = stringIndexMap,
+                typeMap = typeIndexMap,
+                fieldMap = fieldIndexMap,
+                methodMap = methodIndexMap,
+                protoMap = protoIndexMap,
+            )
+            InstructionRefRemapper.patch(out, insnPatches, insnMaps)
+                ?.let { return Result.Failed(it) }
+
             out.patchU32(DexFormat.H_MAP_OFF, mapListOff.toLong())
 
             // ── 12. 改 header ──

@@ -82,6 +82,14 @@ android {
         unitTests.all {
             it.maxHeapSize = "2048m"
             it.jvmArgs("-XX:MaxMetaspaceSize=512m")
+            // 外部验证夹具（InjectArtifactFixture）需要把路径传进测试 JVM。
+            // Gradle 不继承环境变量、也不转发 -D，只能显式转发。
+            listOf(
+                "APKFORGE_TEST_APK",
+                "APKFORGE_RELEASE_APK",
+                "APKFORGE_FIXTURE_APK",
+                "APKFORGE_FIXTURE_OUT",
+            ).forEach { k -> System.getenv(k)?.let { v -> it.environment(k, v) } }
         }
     }
 

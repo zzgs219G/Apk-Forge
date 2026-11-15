@@ -149,6 +149,8 @@ class RealReleaseIncrementalTest {
             com.android.tools.smali.dexlib2.Opcode.INVOKE_STATIC,
             m.implementation!!.instructions.first().opcode,
         )
-        assertTrue("应在 5 秒内完成（原来全量要 ~10 秒）", ms < 5000)
+        // 早期错误版本是 0.3 秒，但产物装上闪退（注解与指令索引未重映射）。
+        // 补齐后约 1~2 秒，仍比全量 9 秒快数倍。
+        assertTrue("应在 5 秒内完成（原来全量要 ~10 秒），实际 ${ms}ms", ms < 5000)
     }
 }

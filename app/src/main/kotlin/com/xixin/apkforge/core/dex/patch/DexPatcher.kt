@@ -218,7 +218,9 @@ object DexPatcher {
         patchU32(out, DexFormat.H_DATA_SIZE, (newSize - oldDataOff).toLong())
 
         // (6) 更新 map_list 里的 code_item / class_data_item 计数
-        updateMapCounts(src, out, dexBytes)
+        // 不需要改 map_list：本次只是「替换引用」，条目总数不变。
+        // 曾经在这里给 code_item / class_data 的 size +1，导致 map 与实际不符，
+        // ART 拒收。详见 git log。
 
         val result = out.toByteArray()
         // (7) 重算 checksum 与 signature（必须在其它所有修改之后）
@@ -246,36 +248,6 @@ object DexPatcher {
      *
      * 计数是 +1（本次只追加了一个新 code_item 和一个新 class_data_item）。
      * `map_off` 本身指向的位置不变（map_list 仍在原处，我们只改其中 size 字段）。
-     */
-    private fun updateMapCounts(src: DexBuffer, out: GrowableBuffer, original: ByteArray) {
-        val mapOff = src.u32AsInt(DexFormat.H_MAP_OFF, "map_off")
-        if (mapOff == 0) return
-
-        val count = src.u32AsInt(mapOff, "map size")
-        // map_list: u32 size，随后 count 个 map_item（每项 12 字节）
-        for (i in 0 until count) {
-            val itemOff = mapOff + 4 + i * DexFormat.MAP_ITEM_WIDTH
-            if (itemOff + DexFormat.MAP_ITEM_WIDTH > original.size) break
-            val type = src.u16(itemOff)
-            val sizeOff = itemOff + 4
-            val size = src.u32(sizeOff)
-            when (type) {
-                DexFormat.TYPE_CODE_ITEM -> patchU32(out, sizeOff, size + 1)
-                DexFormat.TYPE_CLASS_DATA_ITEM -> patchU32(out, sizeOff, size + 1)
-                else -> Unit
-            }
-        }
-    }
-
-    /**
-     * 查询某个方法在**本 dex** `method_ids` 表里的下标。
-     *
-     * 【为什么增量路径必须要它】编码一条 `invoke` 指令需要 `method_idx`，
-     * 而增量写入的前提是「引用已在池里、只改偏移」。所以这个下标必须能在
-     * 本 dex 里查到；查不到就说明引用不在池中，增量做不了，要退回全量。
-     *
-     * 匹配依据是「定义类 + 方法名 + 签名」三项全等——
-     * 只看名字会把重载方法认错。
      */
     fun resolveMethodIndex(
         dexBytes: ByteArray,
@@ -349,6 +321,7 @@ object DexPatcher {
     fun hasTryBlocks(dexBytes: ByteArray, codeOff: Int): Boolean = runCatching {
         DexBuffer(dexBytes).u16(codeOff + DexFormat.CI_TRIES_SIZE) > 0
     }.getOrDefault(true)
+
 
     // ────────────────────────── 校验 ──────────────────────────
 

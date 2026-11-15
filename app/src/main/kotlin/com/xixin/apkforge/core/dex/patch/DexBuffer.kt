@@ -135,6 +135,19 @@ internal class GrowableBuffer(initialCapacity: Int) {
         buf[at + 3] = ((v ushr 24) and 0xFF).toByte()
     }
 
+    /** 原位写一个 16 位小端值（改 dex 指令里的索引时用）。 */
+    fun patchU16(at: Int, v: Int) {
+        require(at >= 0 && at + 2 <= len) { "原位修改越界：offset=$at 已写入=$len" }
+        buf[at] = (v and 0xFF).toByte()
+        buf[at + 1] = ((v ushr 8) and 0xFF).toByte()
+    }
+
+    /** 原位读一个 16 位小端值。 */
+    fun peekU16(at: Int): Int {
+        require(at >= 0 && at + 2 <= len) { "读取越界：offset=$at 已写入=$len" }
+        return (buf[at].toInt() and 0xFF) or ((buf[at + 1].toInt() and 0xFF) shl 8)
+    }
+
     fun toByteArray(): ByteArray = buf.copyOf(len)
 
     companion object {
