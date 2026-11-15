@@ -74,15 +74,18 @@ object DexCallInjector {
     }
 
     fun containsClass(dexBytes: ByteArray, ownerType: String): Boolean = try {
-        DexBackedDexFile.fromInputStream(Opcodes.getDefault(), dexBytes.inputStream())
+        DexBackedDexFile.fromInputStream(DexOpcodes.forBytes(dexBytes), dexBytes.inputStream())
             .classes.any { it.type == ownerType }
     } catch (_: Exception) {
         false
     }
 
     fun inject(dexBytes: ByteArray, spec: Spec): Outcome {
+        // 用 dex 自己的版本头取 Opcodes。用 Opcodes.getDefault()（api=20）会让
+        // 写回的 dex 版本头降级成 035，而 039-only 指令在 035 校验器下是非法 dex。
+        val opcodes = DexOpcodes.forBytes(dexBytes)
         val srcDex: DexFile = try {
-            DexBackedDexFile.fromInputStream(Opcodes.getDefault(), dexBytes.inputStream())
+            DexBackedDexFile.fromInputStream(opcodes, dexBytes.inputStream())
         } catch (e: Exception) {
             return Outcome.Failed("dex 解析失败: ${e.message}")
         }
@@ -273,7 +276,8 @@ object DexCallInjector {
         )
 
         val newDexFile = SimpleDexFile(
-            srcDex.classes.map { if (it.type == spec.ownerType) newClass else it }
+            srcDex.classes.map { if (it.type == spec.ownerType) newClass else it },
+            opcodes,
         )
 
         return try {
@@ -368,10 +372,11 @@ object DexCallInjector {
     }
 }
 
-/** 最小 DexFile 实现。 */
+/** 最小 DexFile 实现。[opcodes] 必须与被改写的源 dex 一致，否则写出时版本头会被改掉。 */
 private class SimpleDexFile(
     private val classDefs: List<ClassDef>,
+    private val opcodes: Opcodes,
 ) : DexFile {
     override fun getClasses(): Set<ClassDef> = LinkedHashSet(classDefs)
-    override fun getOpcodes(): Opcodes = Opcodes.getDefault()
+    override fun getOpcodes(): Opcodes = opcodes
 }

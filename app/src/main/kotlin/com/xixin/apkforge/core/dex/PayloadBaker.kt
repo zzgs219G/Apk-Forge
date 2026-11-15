@@ -53,9 +53,12 @@ object PayloadBaker {
 
     /** 把 [configJsonc] 写进 [dexBytes] 的 `PayloadConfig.baked()`。 */
     fun bake(dexBytes: ByteArray, configJsonc: String): Outcome {
+        // 载荷 dex 是我们自己用 d8 产出的，版本头取决于 build-tools；
+        // 同样不能假设它是 035——用文件头里写着的那一版。
+        val opcodes = DexOpcodes.forBytes(dexBytes)
         val src = try {
             DexBackedDexFile.fromInputStream(
-                Opcodes.getDefault(), java.io.BufferedInputStream(dexBytes.inputStream())
+                opcodes, java.io.BufferedInputStream(dexBytes.inputStream())
             ) as DexFile
         } catch (e: Exception) {
             return Outcome.Failed("载荷 dex 解析失败：${e.message}")
@@ -113,7 +116,7 @@ object PayloadBaker {
             override fun getClasses(): Set<ClassDef> =
                 LinkedHashSet(src.classes.map { if (it.type == CONFIG_CLASS) newClass else it })
 
-            override fun getOpcodes(): Opcodes = Opcodes.getDefault()
+            override fun getOpcodes(): Opcodes = opcodes
         }
 
         return try {
@@ -147,7 +150,7 @@ object PayloadBaker {
      */
     fun extract(dexBytes: ByteArray): String? = try {
         val df = DexBackedDexFile.fromInputStream(
-            Opcodes.getDefault(), java.io.BufferedInputStream(dexBytes.inputStream())
+            DexOpcodes.forBytes(dexBytes), java.io.BufferedInputStream(dexBytes.inputStream())
         )
         val m = df.classes.firstOrNull { it.type == CONFIG_CLASS }
             ?.methods?.toList()

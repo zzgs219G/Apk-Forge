@@ -1,6 +1,5 @@
 package com.xixin.apkforge.core.dex
 
-import com.android.tools.smali.dexlib2.Opcodes
 import com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile
 import java.io.File
 import com.xixin.apkforge.core.apk.ApkRepackager
@@ -41,7 +40,7 @@ object ClassInspector {
         for (name in dexNames) {
             val bytes = ApkRepackager.readEntry(apk, name) ?: continue
             val df = runCatching {
-                DexBackedDexFile.fromInputStream(Opcodes.getDefault(), bytes.inputStream())
+                DexBackedDexFile.fromInputStream(DexOpcodes.forBytes(bytes), bytes.inputStream())
             }.getOrNull() ?: continue
 
             val cls = df.classes.firstOrNull { it.type == classInternal } ?: continue
