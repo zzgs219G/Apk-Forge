@@ -151,6 +151,9 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         val ALL_STANDARD_NAMES: Set<String> = LifecyclePoints.ALL_STANDARD.map { it.name }.toSet()
     }
 
+    /** 相对本次任务起点的毫秒偏移，用于日志左侧的 `+1.24s`。 */
+    private fun elapsedFrom(startedAt: Long): Long = System.currentTimeMillis() - startedAt
+
     init {
         state = state.copy(configs = configs.list(), records = tasks.list())
     }
@@ -440,7 +443,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                     stage = ApkInjectPipeline.Stage.SAVE,
                     progress = ApkInjectPipeline.progressOf(ApkInjectPipeline.Stage.SAVE, 0.2f),
                 )
-                state = state.copy(steps = state.steps + saveStartStep(app, tmp))
+                state = state.copy(steps = state.steps + saveStartStep(app, tmp, elapsedFrom(startedAt)))
                 savedPath = withContext(Dispatchers.IO) {
                     runCatching {
                         OutputStore.saveApk(
@@ -450,7 +453,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 tmp.delete()
                 state = state.copy(
-                    steps = state.steps + saveEndStep(savedPath),
+                    steps = state.steps + saveEndStep(savedPath, elapsedFrom(startedAt)),
                     progress = 1f,
                 )
             }
@@ -495,19 +498,35 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun saveStartStep(app: Application, tmp: File) = ApkInjectPipeline.Step(
+    /**
+     * 落盘阶段的两条日志。
+     *
+     * 【必须显式传 atMs】`Step.atMs` 是「相对本次任务开始的时间偏移」，
+     * 默认值 0 会在日志里显示成 `+0.00s`——实测表现为：
+     *
+     * ```
+     * +15.78s  [重写压缩包] 完成
+     * +0.00s   [落盘 Download] 写入 Download      ← 突然归零，像又重新开始了
+     * +0.00s   [落盘 Download] 已保存
+     * ```
+     *
+     * 用户会以为任务重启了，或者以为落盘不耗时（实际 49.8MB 写下去要几百毫秒）。
+     */
+    private fun saveStartStep(app: Application, tmp: File, atMs: Long) = ApkInjectPipeline.Step(
         stage = ApkInjectPipeline.Stage.SAVE,
         label = "写入 Download",
         detail = OutputStore.displayDir(),
         progress = ApkInjectPipeline.progressOf(ApkInjectPipeline.Stage.SAVE, 0.2f),
+        atMs = atMs,
     )
 
-    private fun saveEndStep(path: String?) = ApkInjectPipeline.Step(
+    private fun saveEndStep(path: String?, atMs: Long) = ApkInjectPipeline.Step(
         stage = ApkInjectPipeline.Stage.SAVE,
         label = if (path != null) "已保存" else "写入失败",
         detail = path ?: "MediaStore 拒绝写入，请检查存储空间",
         warn = path == null,
         progress = 1f,
+        atMs = atMs,
     )
 
     // ────────────────────── 记录 ──────────────────────
