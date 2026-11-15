@@ -67,20 +67,21 @@ internal object InstructionRefRemapper {
                     val start = (insn as? DexBackedInstruction)?.instructionStart ?: continue
                     val ref = (insn as? ReferenceInstruction)?.reference ?: continue
 
-                    // 索引所在位置由**指令格式**决定，不能用 `is Instruction3rc` 判断：
-                    // dexlib2 的 3rc 实现类未必实现该接口，判断失败就会把 +2 当成索引，
-                    // 实际那是**起始寄存器** —— 结果寄存器号被改成索引值（实测出现 r471），
-                    // jadx 报 `Incorrect register number`。
+                    // ⚠️ 3rc/4rcc 的布局与直觉相反（实测 + dexlib2 验证）：
+                    //   [0] op | AA          AA = 寄存器个数
+                    //   [1] BBBB = **方法索引**
+                    //   [2] BBBB = **起始寄存器**   ← 在最后，不是第二字！
                     //
-                    // 格式与「索引字」的对应：
-                    //   21c/22c/35c/45cc → 第 1 字（+2）
-                    //   3rc/4rcc         → 第 2 字（+4），第 1 字是起始寄存器
-                    val wordCount = insn.codeUnits
+                    // 第一版按「起始寄存器在前、索引在后」处理，把 method_idx 写进了
+                    // 起始寄存器字段 —— 产物里出现 r471 这类非法寄存器号，
+                    // jadx 报 `Incorrect register number in instruction: INVOKE`。
+                    //
+                    // 所以 3rc/4rcc 与 35c 一样，索引都在 +2；4rcc 的 proto 在 +6。
                     val fmt = insn.opcode.format
                     val isRangeFmt = fmt != null && (
                         fmt.name.startsWith("Format3rc") || fmt.name.startsWith("Format4rcc")
                         )
-                    val idxOffset = start + if (isRangeFmt) 4 else 2
+                    val idxOffset = start + 2
 
                     when (ref) {
                         is StringReference -> {
