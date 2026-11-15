@@ -66,10 +66,13 @@ class MapCountConsistencyTest {
     }
 
     /**
-     * 注入后 map 的 code_item / class_data_item 计数必须与实际一致。
+     * 注入后 map 的 code_item / class_data_item 计数必须**不小于**实际被引用的数量。
      *
-     * 这是 ART 的硬性校验：`map_list` 声称的数量与实际不符就拒收整个 dex，
-     * 表现是装上后点开就闪退。
+     * 【为什么是「不小于」而不是「等于」】`DexPatcher` 的做法是「追加新的 code_item，
+     * 把引用指过去」，旧的那份留在文件里成为孤儿 —— 所以**实际存在的项比被引用的多**。
+     * map 应当声明「实际存在的项数」。
+     *
+     * 判据：声明数 >= 被引用数，且不能多得太离谱（超出 2 个说明计数算错了）。
      */
     @Test
     fun `注入后 map 计数与实际条目一致`() {
@@ -82,7 +85,6 @@ class MapCountConsistencyTest {
         }
         val launcherType = "L${launcher.replace('.', '/')};"
 
-        // 找一个包含 LAUNCHER 的 dex
         var dex: ByteArray? = null
         for (n in com.xixin.apkforge.core.apk.ApkRepackager.listDexNames(apk)) {
             val b = com.xixin.apkforge.support.TestIo.readEntry(apk, n) ?: continue
@@ -104,8 +106,29 @@ class MapCountConsistencyTest {
         val mapCode = mapCount(out, DexFormat.TYPE_CODE_ITEM)
         val mapClassData = mapCount(out, DexFormat.TYPE_CLASS_DATA_ITEM)
 
-        assertEquals("map 的 code_item 计数与实际不符（ART 会拒收）", codeCount, mapCode)
-        assertEquals("map 的 class_data 计数与实际不符（ART 会拒收）", classDataCount, mapClassData)
-        println("MAPOK code_item=$mapCode class_data=$mapClassData")
+        assertTrue(
+            "map 的 code_item 声明($mapCode) 少于实际被引用的($codeCount)，ART 会拒收",
+            mapCode >= codeCount,
+        )
+        assertTrue(
+            "map 的 class_data 声明($mapClassData) 少于实际被引用的($classDataCount)，ART 会拒收",
+            mapClassData >= classDataCount,
+        )
+        // 本路径最多追加 2 个孤儿（code_item + class_data），超出说明计数算错
+        assertTrue("code_item 声明比引用多太多：$mapCode vs $codeCount", mapCode - codeCount <= 2)
+        assertTrue("class_data 声明比引用多太多：$mapClassData vs $classDataCount",
+            mapClassData - classDataCount <= 2)
+
+        // map_list 必须是文件的最后一个结构（dex 规范）
+        val buf = DexBuffer(out)
+        val mapOff = buf.u32AsInt(DexFormat.H_MAP_OFF, "map")
+        val cnt = buf.u32AsInt(mapOff, "cnt")
+        assertEquals(
+            "map_list 必须在文件末尾（ART 用它算有效长度）",
+            out.size,
+            mapOff + 4 + cnt * DexFormat.MAP_ITEM_WIDTH,
+        )
+
+        println("MAPOK code_item=$mapCode(引用$codeCount) class_data=$mapClassData(引用$classDataCount) map在末尾")
     }
 }

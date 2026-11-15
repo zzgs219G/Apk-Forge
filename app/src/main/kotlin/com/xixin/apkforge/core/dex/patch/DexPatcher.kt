@@ -217,10 +217,52 @@ object DexPatcher {
         val oldDataOff = src.u32AsInt(DexFormat.H_DATA_OFF, "data_off")
         patchU32(out, DexFormat.H_DATA_SIZE, (newSize - oldDataOff).toLong())
 
-        // (6) 更新 map_list 里的 code_item / class_data_item 计数
-        // 不需要改 map_list：本次只是「替换引用」，条目总数不变。
-        // 曾经在这里给 code_item / class_data 的 size +1，导致 map 与实际不符，
-        // ART 拒收。详见 git log。
+        // (6) 重写 map_list，放到文件末尾
+        // 【为什么必须做】dex 规范要求 `map_list` 是文件的**最后一个结构**。
+        // 这里追加了新 code_item 与 class_data_item，它们落在原 map_list 之后，
+        // 于是 map 不再是最后一项 —— ART / MT 解析时会用「map 末尾」当有效长度，
+        // 读后面的数据就越界（实测报 ArrayIndexOutOfBoundsException:
+        // length=35405044; index=35405132）。
+        //
+        // 做法：把原 map 的每一项复制出来，更新 code_item / class_data_item 的
+        // 条目数与 offset，再整表写到当前位置。
+        val oldMapOff = src.u32AsInt(DexFormat.H_MAP_OFF, "map_off")
+        if (oldMapOff != 0) {
+            val items = LinkedHashMap<Int, Pair<Int, Int>>()   // type -> (size, offset)
+            val count = src.u32AsInt(oldMapOff, "map size")
+            repeat(count) { i ->
+                val o = oldMapOff + 4 + i * DexFormat.MAP_ITEM_WIDTH
+                if (o + DexFormat.MAP_ITEM_WIDTH > dexBytes.size) return@repeat
+                val type = src.u16(o)
+                items[type] = src.u32AsInt(o + 4, "size") to src.u32AsInt(o + 8, "offset")
+            }
+            // 本次追加了一个 code_item 和一个 class_data_item（旧的成为孤儿但仍在文件里，
+            // 计数按「实际存在的项」算，不是按被引用的项算）
+            items[DexFormat.TYPE_CODE_ITEM]?.let { e ->
+                items[DexFormat.TYPE_CODE_ITEM] = (e.first + 1) to e.second
+            }
+            items[DexFormat.TYPE_CLASS_DATA_ITEM]?.let { e ->
+                items[DexFormat.TYPE_CLASS_DATA_ITEM] = (e.first + 1) to e.second
+            }
+
+            out.align(4)
+            val newMapOff = out.position
+            items[DexFormat.TYPE_MAP_LIST] = 1 to newMapOff
+
+            val sorted = items.toSortedMap()
+            out.u32(sorted.size.toLong())
+            sorted.forEach { (type, v) ->
+                out.u16(type)
+                out.u16(0)
+                out.u32(v.first.toLong())
+                out.u32(v.second.toLong())
+            }
+            newSize = out.position
+            patchU32(out, DexFormat.H_MAP_OFF, newMapOff.toLong())
+            // file_size / data_size 要用最终大小重写一次
+            patchU32(out, DexFormat.H_FILE_SIZE, newSize.toLong())
+            patchU32(out, DexFormat.H_DATA_SIZE, (newSize - oldDataOff).toLong())
+        }
 
         val result = out.toByteArray()
         // (7) 重算 checksum 与 signature（必须在其它所有修改之后）
