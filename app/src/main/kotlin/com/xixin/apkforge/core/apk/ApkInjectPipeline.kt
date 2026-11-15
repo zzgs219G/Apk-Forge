@@ -1,19 +1,29 @@
 package com.xixin.apkforge.core.apk
 
-import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import com.xixin.apkforge.core.axml.AxmlManifest
 import com.xixin.apkforge.core.dex.ClassInspector
 import com.xixin.apkforge.core.dex.DexCallInjector
+import com.xixin.apkforge.core.dex.DexOpcodes
+import com.xixin.apkforge.core.dex.InjectIdempotency
 import com.xixin.apkforge.core.dex.InjectionMode
 import com.xixin.apkforge.core.dex.InjectionPlanner
 import com.xixin.apkforge.core.dex.LifecyclePoints
+import com.xixin.apkforge.core.dex.PackIntegrity
 import com.xixin.apkforge.core.dex.SmaliCallParser
 
 /**
  * 注入流水线：APK → 解析 LAUNCHER → 定位 dex → 插调用（缺失则建方法）→ 追加 payload → 重打包。
+ *
+ * 【为什么不持有 Context】这条流水线原来有一个 `private val context: Context`，
+ * 但全文件没用到它一次——留着它等于把「核心逻辑可在纯 JVM 上跑」这条铁律
+ * 降级成一句注释：`core/` 里出现 `android.*` 就会失去端到端单测能力
+ * （AGENTS.md §1.1）。去掉之后 `ApkInjectPipeline` 可以直接在 JVM 上被测试，
+ * 而不只是它调用的 `DexCallInjector` / `ApkRepackager`。
+ *
+ * 需要 Context 的事（落盘到 Download、读配置）都在 `data/` 层做，由 ViewModel 编排。
  *
  * 【为什么要「阶段 + 进度」】旧版只回调一句日志，UI 只能转圈。进度条要动得**真实**，
  * 就必须让流水线自己说出「现在在整条链路的哪一段」。所以每条 [Step] 自带
@@ -21,7 +31,7 @@ import com.xixin.apkforge.core.dex.SmaliCallParser
  * 顺手把重打包的逐条目写入也接上回调——那几百个条目正是「日志飞速滚动」的真实来源，
  * 而不是拿假日志糊弄人。
  */
-class ApkInjectPipeline(private val context: Context) {
+class ApkInjectPipeline {
 
     /**
      * 流水线阶段。`weight` 是这一段的相对耗时权重，用来把「阶段」换算成连续进度：
@@ -168,6 +178,12 @@ class ApkInjectPipeline(private val context: Context) {
                 step(Stage.MANIFEST, "注入点", "$resolved（$src）")
 
                 // ── 4. 解析调用 ──
+                // 注意这一步归 Stage.MANIFEST 而不是 Stage.INJECT：进度是按
+                // `Stage` 声明顺序折算的（READ→MANIFEST→LOCATE→INJECT→…），
+                // 而「解析调用行」发生在定位 dex 之前。挂到 INJECT 上会让进度
+                // 先跳到 0.33（INJECT 段）再掉回 0.15（LOCATE 段）——
+                // UI 用 `maxOf` 掩盖了倒退，但「进度不许倒退」是坑 22 的契约。
+                // 这条由 `PipelineEndToEndTest.整条流水线跑通并只多一个 dex` 钉住。
                 val (calls, errors) = SmaliCallParser.parseAll(input.callsText)
                 if (!errors.isEmpty) {
                     return@withContext Result(
@@ -178,14 +194,14 @@ class ApkInjectPipeline(private val context: Context) {
                 if (calls.isEmpty()) {
                     return@withContext Result(false, steps, "没有解析出任何调用，请粘贴 invoke 行")
                 }
-                step(Stage.INJECT, "解析调用行", "${calls.size} 条 invoke")
+                step(Stage.MANIFEST, "解析调用行", "${calls.size} 条 invoke")
                 // 把每条调用的落点单独列一行：出问题时用户第一件想确认的事
                 // 就是「我插的到底是哪个类的方法」，而原始 smali 行太长，日志里读不出来。
                 // 逐条列出，不省略：日志是给人（也给 AI）看的，省略号等于把需求砍掉。
                 // 条数确实可能很多，但这里全量列出——界面上是单行滚动区，不占版面。
                 calls.forEach { c ->
                     step(
-                        Stage.INJECT, "→ ${c.owner.simpleType()}.${c.name}",
+                        Stage.MANIFEST, "→ ${c.owner.simpleType()}.${c.name}",
                         c.kind.opcodeBase +
                             c.paramTypes.joinToString("", "(", ")") + c.returnType,
                     )
@@ -196,7 +212,35 @@ class ApkInjectPipeline(private val context: Context) {
                 if (dexNames.isEmpty()) {
                     return@withContext Result(false, steps, "APK 内没有 dex")
                 }
-                step(Stage.LOCATE, "扫描 dex 清单", "${dexNames.size} 个：${dexNames.joinToString()}")
+
+                // 加固检测：只认确定性证据（魔数/头部字段/结构自相矛盾），
+                // 不数阈值。全部 dex 都不可读时才拦，因为那时注入必然失败，
+                // 而失败信息会误导成「类名写错」——真正的原因是 dex 被加密了。
+                //
+                // ⚠️ 这一段的每条 step 都必须是 sub = 0f：LOCATE 段后面还有
+                // 逐 dex 扫描（从 1/N 报起），这里报 1f 会让进度先冲顶再退回。
+                val integrity = PackIntegrity.inspect(input.sourceApk)
+                integrity.issues.forEach { issue ->
+                    step(Stage.LOCATE, "dex 结构异常：${issue.entry}", issue.detail, warn = true, sub = 0f)
+                }
+                integrity.hint?.let {
+                    step(Stage.LOCATE, "疑似加固包", it, warn = true, sub = 0f)
+                }
+                if (integrity.blocked) {
+                    return@withContext Result(
+                        false, steps,
+                        integrity.hint ?: "所有 dex 都无法解析，注入不可能成功。请换一个未加固的包"
+                    )
+                }
+                // sub 从 0 起：紧接着的逐 dex 扫描会从 1/N 往上报，
+                // 若这里默认 sub=1f，进度会先冲到本段末尾再退回 1/N（倒退）。
+                step(
+                    Stage.LOCATE, "扫描 dex 清单",
+                    "${dexNames.size} 个：" + dexNames.joinToString() +
+                        if (integrity.issues.isEmpty()) " · 头部全部合法"
+                        else " · ${integrity.issues.size} 处头部异常",
+                    sub = 0f,
+                )
 
                 val ownerType = "L${resolved.replace('.', '/')};"
                 var hitDex: String? = null
@@ -264,6 +308,9 @@ class ApkInjectPipeline(private val context: Context) {
                 // 智能转换失效，编译器会把它当 ByteArray? 用。
                 var newDexBytes: ByteArray = dexBytes
                 val targetResults = mutableListOf<DexCallInjector.TargetResult>()
+                // 被幂等保护跳过的落点。空表示这次没有任何方法被跳过。
+                val skippedTargets = mutableListOf<String>()
+
                 plan.targets.forEachIndexed { i, t ->
                     val spec = DexCallInjector.Spec(
                         ownerType = ownerType,
@@ -272,6 +319,26 @@ class ApkInjectPipeline(private val context: Context) {
                         calls = calls,
                         replaceBody = t.replaceBody,
                     )
+
+                    // 幂等保护：方法开头已经是这条调用就跳过。
+                    // 判据在 InjectIdempotency 里（精确比对 owner/name/参数/返回值），
+                    // 不看「载荷类有没有被调用过」——那会误伤「同一个类要插两个方法」。
+                    when (val verdict = InjectIdempotency.check(input.sourceApk, spec)) {
+                        is InjectIdempotency.Verdict.AlreadyInjected -> {
+                            step(
+                                Stage.INJECT,
+                                "跳过重复注入：${t.point.name}",
+                                InjectIdempotency.message(verdict, t.point.name),
+                                warn = true,
+                                sub = (i + 1).toFloat() / plan.targets.size,
+                            )
+                            skippedTargets += t.point.name
+                            return@forEachIndexed
+                        }
+                        InjectIdempotency.Verdict.Clean,
+                        InjectIdempotency.Verdict.Unknown -> Unit
+                    }
+
                     val outcome = DexCallInjector.inject(newDexBytes, spec)
                     newDexBytes = when (outcome) {
                         is DexCallInjector.Outcome.Injected -> {
@@ -300,9 +367,20 @@ class ApkInjectPipeline(private val context: Context) {
                             return@withContext Result(false, steps, "注入失败: ${outcome.reason}")
                     }
                 }
+                // 全部落点都被幂等保护跳过：这时产物会和源包一模一样（只多一个 payload dex），
+                // 产出它没有意义，而且会让用户以为「注入成功了」。如实说清楚并停下。
+                if (targetResults.isEmpty() && skippedTargets.isNotEmpty()) {
+                    return@withContext Result(
+                        false, steps,
+                        "没有可注入的落点：${skippedTargets.joinToString()} 开头已经是我们这条调用。" +
+                            "重复注入只会让载荷执行多次，已停止。请从注入前的原始包重新开始。",
+                    )
+                }
+
                 step(
                     Stage.INJECT, "回写 dex 池",
-                    "$dexName ${bytes(dexBytes.size)} → ${bytes(newDexBytes.size)}",
+                    "$dexName ${bytes(dexBytes.size)} → ${bytes(newDexBytes.size)}" +
+                        " · dex ${DexOpcodes.label(dexBytes)}",
                 )
 
                 // ── 8. payload ──
@@ -322,9 +400,11 @@ class ApkInjectPipeline(private val context: Context) {
                 }
 
                 // ── 9. 重打包（逐条目上报，限流后约 60~80 行日志）──
+                // 同上：这一段之后还有逐落点的真实进度，这里先报 0 而不是 1
                 step(
                     Stage.REPACK, "重写压缩包",
                     "替换 $dexName" + if (payloadBytes != null) " + 追加 payload" else "",
+                    sub = 0f,
                 )
                 // 条目可能上千，全部上报会把日志刷成噪音；按总量切 ~60 段采样
                 var lastReported = -1
@@ -349,6 +429,28 @@ class ApkInjectPipeline(private val context: Context) {
                     Stage.REPACK, "完成",
                     "${stats.totalEntries} 条目 · ${mb(stats.originalSize)} → ${mb(stats.outputSize)}",
                 )
+
+                // 重打包后两条「产物能不能装」的事实，必须报出来而不是留给用户试装：
+                //  1. 对齐：STORED 条目丢了 extra field 的对齐填充（ZipEntry 不搬 extra），
+                //     .arsc 未 4 字节对齐、.so 未页对齐都是装机/加载失败级别的问题；
+                //  2. 签名：java.util.zip 重写后 APK Signing Block 必然丢失，
+                //     产物是**完全未签名**的，不是「签名不匹配」——任何设备都装不上。
+                if (stats.misalignedEntries > 0) {
+                    step(
+                        Stage.REPACK, "对齐异常",
+                        "${stats.misalignedEntries} 个 STORED 条目未落在原有对齐上，" +
+                            "产物可能装不上或资源加载失败。请把这条日志连同 APK 一起反馈",
+                        warn = true,
+                    )
+                }
+                if (stats.sourceHadSignature) {
+                    step(
+                        Stage.REPACK, "签名已失效",
+                        "原包带 v2/v3 签名，重写 zip 后签名块丢失。产物是未签名包，" +
+                            "需要自行用 MT / apksigner 重签后才能安装",
+                        warn = true,
+                    )
+                }
 
                 val dur = elapsed()
                 Result(

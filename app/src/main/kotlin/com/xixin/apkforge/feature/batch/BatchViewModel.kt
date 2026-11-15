@@ -75,7 +75,7 @@ class BatchViewModel(app: Application) : AndroidViewModel(app) {
     var state by mutableStateOf(BatchUiState())
         private set
 
-    private val pipeline = ApkInjectPipeline(app.applicationContext)
+    private val pipeline = ApkInjectPipeline()
     private val configs = ConfigStore(app.applicationContext)
     private val tasks = TaskStore(app.applicationContext)
 

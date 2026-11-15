@@ -139,7 +139,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
     var state by mutableStateOf(ConsoleUiState())
         private set
 
-    private val pipeline = ApkInjectPipeline(app.applicationContext)
+    private val pipeline = ApkInjectPipeline()
     private val configs = ConfigStore(app.applicationContext)
     private val tasks = TaskStore(app.applicationContext)
 
