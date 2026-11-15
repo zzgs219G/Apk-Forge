@@ -9,9 +9,9 @@
 ```
 本地 APK dex 注入工具（Android 端）
 依赖只有 smali-dexlib2 3.0.10 + JUnit
-42 项单元测试基于真实 APK，可离线跑
+单测全部基于真实 APK，可离线跑（条数以 testDebugUnitTest 输出为准，不写死数字）
 4 种注入模式、批量注入、可自造弹窗载荷（payload/）
-无重签名、不处理加固包、只支持 arm64-v8a
+无重签名、不处理加固包的业务逻辑、只支持 arm64-v8a
 ```
 
 ### 目录树（分层有严格语义，不要随意跨层）
@@ -24,12 +24,15 @@ com.xixin.apkforge
 │   ├── axml/AxmlManifest        二进制 AXML 解析
 │   ├── dex/SmaliCallParser      smali invoke 行 → 结构化
 │   ├── dex/ClassInspector       探测类方法/父类
+│   ├── dex/DexOpcodes           从文件头读 dex 版本，给出解析/写出共用的 Opcodes
+│   ├── dex/PackIntegrity        加固检测（只认 dex 头部的确定性证据）
+│   ├── dex/InjectIdempotency    幂等保护：方法开头已是这条调用就跳过
 │   ├── dex/LifecyclePoints      注入点清单 + native 降级判定（★ 纯逻辑，可单测）
 │   ├── dex/InjectionMode        注入模式 + 落点规划器（★ 纯逻辑，可单测）
 │   ├── dex/DexCallInjector      dexlib2 插指令 / 建方法 / 替换方法体
 │   ├── dex/PayloadBaker         把配置烘焙进载荷 dex（★ 纯 JVM，可单测）
 │   ├── dex/SamplePayload        示例载荷常量（调用行 + asset 路径）
-│   ├── apk/ApkRepackager        zip 重打包（只替换 dex + 追加 payload）
+│   ├── apk/ApkRepackager        zip 重打包（只替换 dex + 追加 payload + 保持对齐）
 │   └── apk/ApkInjectPipeline    流水线编排（Stage 权重 + Step 坐标）
 
 ├── data/                        持久化与平台 IO（需要 Context）
@@ -96,13 +99,17 @@ ui → feature → data → core
 
 ```
 app/src/test/kotlin/com/xixin/apkforge/
-├── core/apk/InjectEndToEndTest   9 例  含替代点补 super、替换方法体、产物边界、回调完整性
-├── core/dex/ClassInspectorTest   4 例
-├── core/dex/LifecyclePointsTest  11 例 native 降级 / 体系错配 / 进度单调 / 签名可解析
-├── core/dex/InjectionModeTest    7 例  落点规划：不扩点 / 不重复 / 排除 native / 跨体系不串
-├── core/dex/PluginPayloadTest   11 例  调用行 ↔ 载荷 dex 契约、占位符唯一、烘焙往返、7.0 兼容
-├── core/dex/SamplePayloadTest    2 例
-└── support/TestIo                测试专用 IO 封装
+├── core/apk/InjectEndToEndTest    9 例  含替代点补 super、替换方法体、产物边界、回调完整性
+├── core/apk/PipelineEndToEndTest  4 例  整条流水线、只多一个 dex、阶段序号不倒退、失败给下一步
+├── core/apk/RepackArtifactTest    3 例  dex 版本头不变、STORED 条目保持对齐、Stats 如实报告
+├── core/dex/ClassInspectorTest    4 例
+├── core/dex/InjectIdempotencyTest 6 例  精确重复才拦、换调用行/换签名不拦、端到端跳过
+├── core/dex/LifecyclePointsTest  11 例  native 降级 / 体系错配 / 进度单调 / 签名可解析
+├── core/dex/InjectionModeTest     7 例  落点规划：不扩点 / 不重复 / 排除 native / 跨体系不串
+├── core/dex/PackIntegrityTest     4 例  正常包不误报、加密/大小不符能识别、部分坏不拦
+├── core/dex/PluginPayloadTest     9 例  调用行 ↔ 载荷 dex 契约、占位符唯一、烘焙往返、7.0 兼容
+├── core/dex/SamplePayloadTest     2 例
+└── support/TestIo                 测试专用 IO 封装
 
 payload/dialog/                   弹窗载荷源码（Java，零依赖）
 ├── src/                          PayloadDialog.java
@@ -424,10 +431,16 @@ false，导致改写后的方法没被替换进类。改为按「名字 + 签名
 
 | 项 | 难度 | 说明 |
 |---|---|---|
-| 加固包检测 | 中 | 读 dex 时若发现类数异常少 / 字符串全是乱码，提前提示「疑似加固包」 |
-| 幂等保护 | 低 | 注入前检查目标方法首条指令是否已是目标调用 |
-| 重签名 | 高 | 需解决 `apksig` 的 `java.util.stream` 依赖，或调系统 `apksigner` |
+| 重签名 | 高 | 需解决 `apksig` 的 `java.util.stream` 依赖，或调系统 `apksigner`。**当前产物是完全未签名的**，任何设备都装不上 |
+| 加固包**脱壳** | 很高 | 现在的 `PackIntegrity` 只识别不脱壳（识别是为了把「找不到类」的误导换成真实原因），脱壳是另一个量级的工程 |
 | SVG 外部化 | 低 | 动画路径从 Kotlin 硬编码改到 `res/raw/*.svg` |
+
+已完成（曾经列在这里）：
+
+| 项 | 做法 | 为什么当时的判据被推翻了 |
+|---|---|---|
+| 加固包检测 | `core/dex/PackIntegrity` | 原计划的判据「类数异常少 / 字符串全是乱码」**两条都会误报**：实测正常包里存在只有 0~13 个类的 dex（多 dex 切分产物），也存在 `assets/` 下带 2MB 广告 jar 的正常商业包。改用 dex 头部的确定性证据（魔数 / `file_size` / `header_size` / `endian_tag` / 结构与声明自相矛盾），无可调阈值 |
+| 幂等保护 | `core/dex/InjectIdempotency` | 判据是**精确重复**（owner + 方法名 + 参数 + 返回值全一致且落在方法开头），不是「载荷类被调用过」——后者会误伤「同一个类要插两个方法」 |
 
 ---
 
