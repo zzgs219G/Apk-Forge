@@ -53,18 +53,25 @@ object FastInjector {
     /**
      * 尝试用增量方式完成一次注入。
      *
+     * 两条路径，按顺序尝试：
+     *
+     * 1. **纯增量**：方法池里已有该引用时，只改 code_item（[DexPatcher]）。最快。
+     * 2. **池注入 + 增量**：引用不在池里时，先往池里加条目（[PoolInjector]），
+     *    再改 code_item。这是本工具的核心场景——载荷类是外部类，
+     *    永远不在宿主池里。
+     *
+     * 两者都不适用才返回 [Result.NotApplicable]，让调用方退回全量。
+     *
      * @param dexBytes 目标 dex 的原始字节
      * @param spec 与 [DexCallInjector.inject] 完全相同的规格
      */
     fun tryInject(dexBytes: ByteArray, spec: DexCallInjector.Spec): Result {
         // ── 粗筛一：替换方法体会丢弃原指令 ──
-        // 增量写入的做法是「新 code_item = 前缀 + 原指令」，天然保留原指令。
-        // 实现「丢弃原指令」还得把 try/debug 一并处理干净，属于另一条路径。
         if (spec.replaceBody) {
             return Result.NotApplicable("替换方法体模式需要丢弃原指令，增量路径暂不支持")
         }
 
-        // ── 粗筛二：方法不存在时要新建（要改 method_ids 池）──
+        // ── 粗筛二：方法不存在时要新建（要改 class_data_item，池注入不覆盖）──
         val header = DexPatcher.codeHeader(
             dexBytes, spec.ownerType, spec.methodName, spec.methodSignature
         ) ?: return Result.NotApplicable(
@@ -76,22 +83,55 @@ object FastInjector {
             return Result.NotApplicable("${spec.methodName} 带 try/catch 块，增量路径暂不支持")
         }
 
-        // ── 编码所有调用 ──
         if (spec.calls.isEmpty()) {
             return Result.NotApplicable("没有要插入的调用")
         }
-        val encoded = mutableListOf<Short>()
+
         val warnings = mutableListOf<String>()
+
+        // ── 第一步：确保所有被引用的方法都在池里 ──
+        var workDex = dexBytes
+        var poolInjected = false
+        var reHeader = header
+
+        for (call in spec.calls) {
+            val sig = "(" + call.paramTypes.joinToString("") + ")" + call.returnType
+            val existing = DexPatcher.resolveMethodIndex(workDex, call.owner, call.name, sig)
+            if (existing != null) continue
+
+            // 不在池里 → 池注入
+            val poolResult = PoolInjector.addMethodRef(
+                workDex,
+                PoolInjector.MethodRefRequest(
+                    owner = call.owner,
+                    name = call.name,
+                    paramTypes = call.paramTypes,
+                    returnType = call.returnType,
+                )
+            )
+            when (poolResult) {
+                is PoolInjector.Result.Ok -> {
+                    workDex = poolResult.dex
+                    poolInjected = true
+                    warnings += "已向池注入 ${call.owner}->${call.name}（methodIdx=${poolResult.methodIdx}）"
+                }
+                is PoolInjector.Result.Failed ->
+                    return Result.NotApplicable("池注入失败：${poolResult.reason}")
+            }
+            // 池变大后 code_item 的位置不变（数据段没动），但保险起见重读
+            reHeader = DexPatcher.codeHeader(
+                workDex, spec.ownerType, spec.methodName, spec.methodSignature
+            ) ?: return Result.NotApplicable("池注入后找不到目标方法")
+        }
+
+        // ── 第二步：编码所有调用 ──
+        val encoded = mutableListOf<Short>()
         var usedRange = false
 
         for (call in spec.calls) {
-            val methodIdx = DexPatcher.resolveMethodIndex(
-                dexBytes, call.owner, call.name,
-                "(" + call.paramTypes.joinToString("") + ")" + call.returnType,
-            ) ?: return Result.NotApplicable(
-                "被调用的 ${call.owner}->${call.name} 不在本 dex 的方法池里，" +
-                    "增量写入不能新增池条目（用全量写入才能引用外部方法）"
-            )
+            val sig = "(" + call.paramTypes.joinToString("") + ")" + call.returnType
+            val methodIdx = DexPatcher.resolveMethodIndex(workDex, call.owner, call.name, sig)
+                ?: return Result.NotApplicable("池注入后仍找不到 ${call.owner}->${call.name}")
 
             if (call.registers.any { it.startsWith("v") }) {
                 warnings += "引用了 v 寄存器（${call.registers.joinToString()}）：" +
@@ -99,7 +139,7 @@ object FastInjector {
             }
 
             when (val r = InstructionEncoder.encode(
-                call, methodIdx, header.registersSize, header.insSize
+                call, methodIdx, reHeader.registersSize, reHeader.insSize
             )) {
                 is InstructionEncoder.Result.Ok -> {
                     encoded += r.insns.toList()
@@ -114,9 +154,9 @@ object FastInjector {
             warnings += "寄存器超出 v15 或超过 5 个，已自动改用 /range 形态"
         }
 
-        // ── 真正落笔 ──
+        // ── 第三步：真正落笔改 code_item ──
         val outcome = DexPatcher.replaceCode(
-            dexBytes,
+            workDex,
             DexPatcher.ReplaceCodeRequest(
                 classType = spec.ownerType,
                 methodName = spec.methodName,
@@ -129,8 +169,10 @@ object FastInjector {
                 dex = outcome.dex,
                 injectedCount = spec.calls.size,
                 warnings = warnings,
-                note = "增量写入：${outcome.originalSize} → ${outcome.newSize} 字节" +
-                    "（+${outcome.newSize - outcome.originalSize}）",
+                note = buildString {
+                    if (poolInjected) append("池注入 + ")
+                    append("增量写入：${dexBytes.size} → ${outcome.newSize} 字节")
+                },
             )
             is DexPatcher.Outcome.Failed ->
                 Result.NotApplicable("增量写入失败：${outcome.reason}")

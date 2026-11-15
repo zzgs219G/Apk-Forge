@@ -102,14 +102,16 @@ class RealReleaseIncrementalTest {
     }
 
     /**
-     * 对照组：注入外部 payload 时必须回退，且原因说清是「池里没有」。
+     * 真实包上的对照组：注入外部 payload。
      *
-     * 这条不是测试失败，而是**钉住既有事实**——`docs/日志.md` 里那次
-     * 19 秒就是这么来的。若哪天它突然「成功走增量」了，说明池被改动过，
-     * 需要重新审查。
+     * 【这条曾经断言「必须回退」】写池注入器之前，外部引用必然回退
+     * （`method_idx` 是 per-dex 编号，宿主池里没有该条目）。
+     * 现在 `PoolInjector` 能往池里加条目，限制解除，断言反转为「必须走增量」。
+     *
+     * 用的正是 `docs/日志.md` 里那次 19 秒的同一个包、同一条调用行。
      */
     @Test
-    fun `注入外部 payload 必须回退并说明原因`() {
+    fun `注入外部 payload 现在应走池注入`() {
         val apk = locateReleaseApk()
         assumeTrue("没有 release 样本", apk != null)
         val (_, dexBytes, launcherType) = launcherDex(apk!!)
@@ -123,10 +125,30 @@ class RealReleaseIncrementalTest {
                 "invoke-static {p0}, Lcom/apkforge/demo/DemoDialog;->inject(Landroid/app/Activity;)V"
             ).first,
         )
+
+        val t0 = System.nanoTime()
         val r = FastInjector.tryInject(dexBytes, spec)
-        assertTrue("外部 payload 应回退，实际：$r", r is FastInjector.Result.NotApplicable)
-        val reason = (r as FastInjector.Result.NotApplicable).reason
-        assertTrue("原因应指出方法池问题，实际：$reason", reason.contains("方法池") || reason.contains("池条目"))
-        println("INC 回退原因（预期行为）：$reason")
+        val ms = (System.nanoTime() - t0) / 1_000_000
+
+        assertTrue(
+            "外部 payload 现在应走池注入，实际：$r",
+            r is FastInjector.Result.Injected,
+        )
+        val ok = r as FastInjector.Result.Injected
+        println("INC 外部 payload 走增量：${ms}ms · ${ok.note}")
+
+        // 产物必须可解析，且首条指令是插入的那条
+        val df = DexBackedDexFile.fromInputStream(DexOpcodes.forBytes(ok.dex), ok.dex.inputStream())
+        val cls = df.classes.first { it.type == launcherType }
+        val m = cls.methods.first {
+            it.name == "onCreate" &&
+                it.parameterTypes.map { p -> p.toString() } == listOf("Landroid/os/Bundle;")
+        }
+        assertEquals(
+            "首条指令应是 INVOKE_STATIC",
+            com.android.tools.smali.dexlib2.Opcode.INVOKE_STATIC,
+            m.implementation!!.instructions.first().opcode,
+        )
+        assertTrue("应在 5 秒内完成（原来全量要 ~10 秒）", ms < 5000)
     }
 }

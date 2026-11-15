@@ -89,11 +89,36 @@ internal object DexFormat {
     const val CI_INSNS = 16
 
     // ────────────────────── map_list 类型码 ──────────────────────
-    /** map_list 自身的 type 码 */
+    /**
+     * `map_list` 的 type 码。
+     *
+     * 【为什么需要全部】`map_list` 是 ART 用来快速定位各段的结构：每项记录
+     * 「这一类的数据项有几个、从哪个偏移开始」。池注入把 6 个索引段全搬到了
+     * 文件末尾，所以**每个对应项的 offset 都要改**；新增条目还要改 size。
+     * 漏改任何一项，ART 的校验器会认为 map 与实际不符而拒收——
+     * 而这种错在构建期完全不报错，只在装机时炸。
+     */
     const val TYPE_MAP_LIST = 0x1000
     const val TYPE_HEADER_ITEM = 0x0000
-    const val TYPE_CODE_ITEM = 0x2001
+    const val TYPE_STRING_ID_ITEM = 0x0001
+    const val TYPE_TYPE_ID_ITEM = 0x0002
+    const val TYPE_PROTO_ID_ITEM = 0x0003
+    const val TYPE_FIELD_ID_ITEM = 0x0004
+    const val TYPE_METHOD_ID_ITEM = 0x0005
+    const val TYPE_CLASS_DEF_ITEM = 0x0006
+    const val TYPE_CALL_SITE_ID_ITEM = 0x0007
+    const val TYPE_METHOD_HANDLE_ITEM = 0x0008
+    const val TYPE_STRING_DATA_ITEM = 0x2002
+    const val TYPE_TYPE_LIST = 0x1001
+    const val TYPE_ANNOTATION_SET_REF_LIST = 0x1002
+    const val TYPE_ANNOTATION_SET_ITEM = 0x1003
     const val TYPE_CLASS_DATA_ITEM = 0x2000
+    const val TYPE_CODE_ITEM = 0x2001
+    const val TYPE_DEBUG_INFO_ITEM = 0x2003
+    const val TYPE_ANNOTATION_ITEM = 0x2004
+    const val TYPE_ENCODED_ARRAY_ITEM = 0x2005
+    const val TYPE_ANNOTATIONS_DIRECTORY_ITEM = 0x2006
+    const val TYPE_HIDDENAPI_CLASS_DATA_ITEM = 0xF000
     /** 每种 map item 的固定宽度：type(u16) + unused(u16) + size(u32) + offset(u32) */
     const val MAP_ITEM_WIDTH = 12
 

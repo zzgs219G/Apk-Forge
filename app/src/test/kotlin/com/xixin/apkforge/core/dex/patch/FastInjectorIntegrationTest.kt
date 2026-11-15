@@ -36,13 +36,17 @@ class FastInjectorIntegrationTest {
         File(System.getProperty("java.io.tmpdir"), "apkforge-fast-$tag").apply { mkdirs() }
 
     /**
-     * 载荷类不在宿主的 dex 里，所以「引用不在池」是本项目的**正常情况**，
-     * 增量必然不适用。这条以此钉住：回退必须有明确原因，且不能崩。
+     * 外部 payload 引用：**应当走池注入路径，而不是回退全量**。
+     *
+     * 【这条测试曾经断言相反的事】在写池注入器之前，外部引用必然回退
+     * （`method_idx` 是 per-dex 编号，宿主池里没有），所以当时钉的是
+     * 「必须回退并说明原因」。现在 `PoolInjector` 能往池里加条目，
+     * 这个限制被解除了，断言随之反转。
      */
     @Test
-    fun `外部载荷引用应回退全量并说明原因`() = runBlocking {
+    fun `外部载荷引用应走池注入路径`() = runBlocking {
         val apk = locateApk()
-        val out = File(workDir("fallback"), "out.apk").apply { delete() }
+        val out = File(workDir("poolinject"), "out.apk").apply { delete() }
         val steps = mutableListOf<ApkInjectPipeline.Step>()
 
         val r = ApkInjectPipeline().run(
@@ -54,13 +58,17 @@ class FastInjectorIntegrationTest {
             )
         ) { steps += it }
 
-        assertTrue("应成功（回退全量后仍然成功），实际 error=${r.error}", r.ok)
+        assertTrue("应成功，实际 error=${r.error}", r.ok)
 
         val fallback = steps.filter { it.label.contains("增量不适用") }
-        assertTrue("应有回退说明，实际步骤：${steps.map { it.label }}", fallback.isNotEmpty())
+        val fast = steps.filter { it.label.contains("注入调用（增量）") }
         assertTrue(
-            "回退原因应说清是引用不在池里，实际：${fallback.map { it.detail }}",
-            fallback.any { it.detail.contains("方法池") || it.detail.contains("池条目") },
+            "外部引用应走增量（池注入）路径，实际回退原因：${fallback.map { it.detail }}",
+            fast.isNotEmpty(),
+        )
+        assertTrue(
+            "应报告池注入，实际：${fast.map { it.detail }}",
+            fast.any { it.detail.contains("池注入") },
         )
     }
 
