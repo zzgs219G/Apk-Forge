@@ -65,6 +65,17 @@ android {
         compose = true
     }
 
+    // 压缩 dex 与 .so：6700 万字节的 dex 压缩后约 1800 万（AGP 默认 STORED）。
+    // 代价是冷启动要解压；不启用 R8，因为注入测试需要真实的类名与代码形态。
+    packaging {
+        dex {
+            useLegacyPackaging = true
+        }
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+
     // 端到端测试会加载 37MB 的真实 APK 并重写 dex，默认堆（512MB）会 OOM。
     // 2048MB 是实测能稳定跑完的下限。
     testOptions {
