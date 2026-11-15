@@ -13,6 +13,7 @@ import com.xixin.apkforge.core.dex.InjectionPlanner
 import com.xixin.apkforge.core.dex.LifecyclePoints
 import com.xixin.apkforge.core.dex.PackIntegrity
 import com.xixin.apkforge.core.dex.SmaliCallParser
+import com.xixin.apkforge.core.dex.patch.FastInjector
 
 /**
  * 注入流水线：APK → 解析 LAUNCHER → 定位 dex → 插调用（缺失则建方法）→ 追加 payload → 重打包。
@@ -338,6 +339,35 @@ class ApkInjectPipeline {
                         InjectIdempotency.Verdict.Clean,
                         InjectIdempotency.Verdict.Unknown -> Unit
                     }
+
+                    // 先试增量写入：只追加新 code_item + 改 4 字节偏移，
+                    // 实测 40MB dex 从 ~9000ms 降到 ~80ms。
+                    // 不适用时（新建方法 / 替换方法体 / 带 try-catch / 引用不在池里）
+                    // 会返回 NotApplicable，那时退回全量 DexPool 路径并说明原因。
+                    val fast = FastInjector.tryInject(newDexBytes, spec)
+                    if (fast is FastInjector.Result.Injected) {
+                        step(
+                            Stage.INJECT, "注入调用（增量）",
+                            "在 ${t.point.name} 开头插入 ${fast.injectedCount} 条调用 · ${fast.note}",
+                            sub = (i + 1).toFloat() / plan.targets.size,
+                        )
+                        fast.warnings.forEach { step(Stage.INJECT, "警告", it, warn = true) }
+                        targetResults += DexCallInjector.TargetResult(
+                            methodName = t.point.name,
+                            signature = t.point.signature,
+                            createdMethod = false,
+                            injectedCount = fast.injectedCount,
+                        )
+                        newDexBytes = fast.dex
+                        return@forEachIndexed
+                    }
+
+                    // 回退不是错误，但必须说清「为什么这次走慢路径」——
+                    // 否则用户看到耗时差异会以为是随机波动。
+                    step(
+                        Stage.INJECT, "增量不适用，改用全量写入",
+                        (fast as FastInjector.Result.NotApplicable).reason,
+                    )
 
                     val outcome = DexCallInjector.inject(newDexBytes, spec)
                     newDexBytes = when (outcome) {
