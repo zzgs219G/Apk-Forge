@@ -92,7 +92,13 @@ internal object InstructionEncoder {
         val contiguous = phys.isEmpty() || (phys.max() - phys.min() + 1 == phys.size)
 
         return if (fits35c) {
-            val u0 = opcode35c(call.kind) or (phys.getOrElse(4) { 0 } shl 12) or (phys.size shl 8)
+            // ⚠️ 35c 的第一个 16 位字：`op | A<<12 | G<<8`。
+            // 高字节拆成两半 —— **高 4 位是寄存器个数 A，低 4 位是第 5 个寄存器 G**。
+            // 曾写成 `phys.size shl 8`，那会把个数塞进 G 的位置、A 恒为 0，
+            // 结果是 `invoke-static {}`（空参数列表）调用一个需要 1 个参数的方法，
+            // 运行时报 `expected 0 argument registers, method signature has 1 or more`。
+            // 这个 bug 在 dex 结构校验（dex2oat --verify）里查不出来，只有真机运行才炸。
+            val u0 = opcode35c(call.kind) or (phys.size shl 12) or (phys.getOrElse(4) { 0 } shl 8)
             val u2 = phys.getOrElse(0) { 0 } or
                 (phys.getOrElse(1) { 0 } shl 4) or
                 (phys.getOrElse(2) { 0 } shl 8) or

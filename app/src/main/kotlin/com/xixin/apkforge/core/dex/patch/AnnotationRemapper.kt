@@ -17,37 +17,55 @@ package com.xixin.apkforge.core.dex.patch
  *        parameter_annotation[]         { u32 method_idx, u32 annotations_off }
  *      }
  *
- * annotation_set_item {  u32 size;  u32 entries[size] → annotation_item }
- * annotation_item     {  u8 visibility;  encoded_annotation }
- * encoded_annotation  {  uleb128 type_idx;  uleb128 size;  element[] }
- * element             {  uleb128 name_idx(string);  encoded_value }
+ * annotation_set_item        { u32 size; u32 entries[size] → annotation_item }
+ * annotation_set_ref_list    { u32 size; u32 list[size]   → annotation_set_item }
+ * annotation_item            { u8 visibility; encoded_annotation }
+ * encoded_annotation         { uleb128 type_idx; uleb128 size; element[] }
+ * element                    { uleb128 name_idx(string); encoded_value }
  * ```
  *
  * `field_idx` / `method_idx` / `type_idx` / `name_idx` 全都是池下标，
  * 池重排后必须逐个重映射。
  *
- * ## 为什么不复用原偏移
+ * ## 为什么四个结构要分开落段
  *
- * 重写后的字节长度可能变化（uleb128 变长），所以每个改写后的 item
- * 都要追加到文件末尾，并把引用它的地方指过去。
- * 这里按「旧偏移 → 新偏移」缓存，`annotation_set` 与 `annotation_item`
- * 都是共享的（多个类可能引用同一个），缓存能避免重复展开。
+ * ART 校验器要求**同一 type 的 item 连续**（map 只记「起点 + 个数」），
+ * 且物理布局必须与 map 顺序一致。所以 `annotation_item`、
+ * `annotation_set_item`、`annotation_set_ref_list`、
+ * `annotations_directory_item` 必须各自成段、各自连续。
+ *
+ * 第一版把它们统统追加到文件末尾，四种 type 交错在一起，
+ * 直接触发 `List too large for insns size` 一类错误。
+ *
+ * 所以这里通过 [Sink] 把每种结构路由到自己的段缓冲。
  */
 internal object AnnotationRemapper {
+
+    /** 按结构种类路由到各自的段缓冲，返回该结构在段内的偏移。 */
+    interface Sink {
+        /** `annotation_item` */
+        fun item(bytes: ByteArray): Int
+
+        /** `annotation_set_item` */
+        fun set(bytes: ByteArray): Int
+
+        /** `annotation_set_ref_list` */
+        fun refList(bytes: ByteArray): Int
+    }
 
     /**
      * 重写一个 `annotations_directory_item` 及其引用到的所有子结构。
      *
-     * @param outSink 追加字节并返回新偏移（用于写子结构）
-     * @param cache 旧偏移 → 新偏移，跨调用共享
-     * @return 重写后的 directory 字节（调用方负责追加并记录新偏移）
+     * @param cache 旧偏移 → 新偏移（段内），跨调用共享。四种结构共用一个表没问题：
+     *              原文件里每个 item 的偏移都是唯一的。
+     * @return 重写后的 directory 字节（调用方负责写入 directory 段）
      */
     fun remapDirectory(
         data: ByteArray,
         dirOff: Int,
         maps: EncodedValueRemapper.Maps,
         cache: MutableMap<Int, Int>,
-        outSink: (ByteArray) -> Int,
+        sink: Sink,
     ): ByteArray {
         val buf = DexBuffer(data)
         val classAnnOff = buf.u32AsInt(dirOff, "class_ann")
@@ -57,8 +75,8 @@ internal object AnnotationRemapper {
 
         val out = GrowableBuffer(16 + (fieldsSize + methodsSize + paramsSize) * 8)
 
-        // class_annotations_off：指向 annotation_set，要重写后指向新位置
-        out.u32(if (classAnnOff == 0) 0L else remapSet(data, classAnnOff, maps, cache, outSink).toLong())
+        // class_annotations_off：指向 annotation_set
+        out.u32(if (classAnnOff == 0) 0L else remapSet(data, classAnnOff, maps, cache, sink).toLong() + 1)
         out.u32(fieldsSize.toLong())
         out.u32(methodsSize.toLong())
         out.u32(paramsSize.toLong())
@@ -70,7 +88,7 @@ internal object AnnotationRemapper {
             val idx = buf.u32AsInt(p, "field_idx")
             val setOff = buf.u32AsInt(p + 4, "set")
             out.u32(maps.fieldMap[idx].toLong())
-            out.u32(if (setOff == 0) 0L else remapSet(data, setOff, maps, cache, outSink).toLong())
+            out.u32(if (setOff == 0) 0L else remapSet(data, setOff, maps, cache, sink).toLong() + 1)
             p += 8
         }
 
@@ -79,15 +97,14 @@ internal object AnnotationRemapper {
             val idx = buf.u32AsInt(p, "m_idx")
             val setOff = buf.u32AsInt(p + 4, "set")
             out.u32(maps.methodMap[idx].toLong())
-            out.u32(if (setOff == 0) 0L else remapSet(data, setOff, maps, cache, outSink).toLong())
+            out.u32(if (setOff == 0) 0L else remapSet(data, setOff, maps, cache, sink).toLong() + 1)
             p += 8
         }
         repeat(paramsSize) {
             val idx = buf.u32AsInt(p, "p_idx")
             val refOff = buf.u32AsInt(p + 4, "ref")
             out.u32(maps.methodMap[idx].toLong())
-            // annotation_set_ref_list：u32 size + size 个 u32（指向 annotation_set）
-            out.u32(if (refOff == 0) 0L else remapSetRefList(data, refOff, maps, cache, outSink).toLong())
+            out.u32(if (refOff == 0) 0L else remapRefList(data, refOff, maps, cache, sink).toLong() + 1)
             p += 8
         }
 
@@ -95,12 +112,12 @@ internal object AnnotationRemapper {
     }
 
     /** `annotation_set_ref_list { u32 size; u32 list[size] }`，每项是 annotation_set 的偏移。 */
-    private fun remapSetRefList(
+    private fun remapRefList(
         data: ByteArray,
         off: Int,
         maps: EncodedValueRemapper.Maps,
         cache: MutableMap<Int, Int>,
-        outSink: (ByteArray) -> Int,
+        sink: Sink,
     ): Int {
         cache[off]?.let { return it }
         val buf = DexBuffer(data)
@@ -109,9 +126,9 @@ internal object AnnotationRemapper {
         out.u32(size.toLong())
         repeat(size) { i ->
             val setOff = buf.u32AsInt(off + 4 + i * 4, "set")
-            out.u32(if (setOff == 0) 0L else remapSet(data, setOff, maps, cache, outSink).toLong())
+            out.u32(if (setOff == 0) 0L else remapSet(data, setOff, maps, cache, sink).toLong() + 1)
         }
-        val newOff = outSink(out.toByteArray())
+        val newOff = sink.refList(out.toByteArray())
         cache[off] = newOff
         return newOff
     }
@@ -122,7 +139,7 @@ internal object AnnotationRemapper {
         off: Int,
         maps: EncodedValueRemapper.Maps,
         cache: MutableMap<Int, Int>,
-        outSink: (ByteArray) -> Int,
+        sink: Sink,
     ): Int {
         cache[off]?.let { return it }
         val buf = DexBuffer(data)
@@ -131,9 +148,9 @@ internal object AnnotationRemapper {
         out.u32(size.toLong())
         repeat(size) { i ->
             val itemOff = buf.u32AsInt(off + 4 + i * 4, "item")
-            out.u32(remapItem(data, itemOff, maps, cache, outSink).toLong())
+            out.u32(remapItem(data, itemOff, maps, cache, sink).toLong() + 1)
         }
-        val newOff = outSink(out.toByteArray())
+        val newOff = sink.set(out.toByteArray())
         cache[off] = newOff
         return newOff
     }
@@ -144,13 +161,13 @@ internal object AnnotationRemapper {
         off: Int,
         maps: EncodedValueRemapper.Maps,
         cache: MutableMap<Int, Int>,
-        outSink: (ByteArray) -> Int,
+        sink: Sink,
     ): Int {
         cache[off]?.let { return it }
         val out = mutableListOf<Byte>()
         out += data[off]                                   // visibility
         EncodedValueRemapper.readAnnotation(data, off + 1, out, maps)
-        val newOff = outSink(out.toByteArray())
+        val newOff = sink.item(out.toByteArray())
         cache[off] = newOff
         return newOff
     }

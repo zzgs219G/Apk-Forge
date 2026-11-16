@@ -39,11 +39,19 @@ internal object CodeItemBuilder {
      *              指令对象：编码逻辑属于 [DexCallInjector] 那一层，
      *              本包只负责「把给定的指令字写进合法的 code_item」
      */
+    /**
+     * 组装一个 code_item。
+     *
+     * @param debugInfoOff 原方法的 `debug_info_off`。**必须原样保留**：
+     *        写成 0 会丢掉行号与局部变量表，崩溃栈里的行号全变成 `??`，
+     *        而且 debug_info 段里会多出一个没人引用的孤儿项。
+     */
     fun build(
         registersSize: Int,
         insSize: Int,
         outsSize: Int,
         insns: ShortArray,
+        debugInfoOff: Long = 0L,
     ): ByteArray {
         require(registersSize in 0..0xFFFF) { "registers_size 越界：$registersSize" }
         require(insSize in 0..registersSize) { "ins_size($insSize) 不能大于 registers_size($registersSize)" }
@@ -54,8 +62,8 @@ internal object CodeItemBuilder {
         out.u16(registersSize)
         out.u16(insSize)
         out.u16(outsSize)
-        out.u16(0)                 // tries_size = 0
-        out.u32(0L)                // debug_info_off = 0
+        out.u16(0)                 // tries_size = 0（带 try 的方法由调用方拒绝）
+        out.u32(debugInfoOff)      // debug_info_off：保留原值
         out.u32(insns.size.toLong())  // insns_size 单位是 16 位字
         insns.forEach { out.u16(it.toInt() and 0xFFFF) }
         return out.toByteArray()

@@ -142,10 +142,25 @@ internal class GrowableBuffer(initialCapacity: Int) {
         buf[at + 1] = ((v ushr 8) and 0xFF).toByte()
     }
 
+    /** 原位读一个 8 位值。 */
+    fun peekU8(at: Int): Int {
+        require(at >= 0 && at < len) { "读取越界：offset=$at 已写入=$len" }
+        return buf[at].toInt() and 0xFF
+    }
+
     /** 原位读一个 16 位小端值。 */
     fun peekU16(at: Int): Int {
         require(at >= 0 && at + 2 <= len) { "读取越界：offset=$at 已写入=$len" }
         return (buf[at].toInt() and 0xFF) or ((buf[at + 1].toInt() and 0xFF) shl 8)
+    }
+
+    /** 原位读一个 32 位小端值。 */
+    fun peekU32(at: Int): Int {
+        require(at >= 0 && at + 4 <= len) { "读取越界：offset=$at 已写入=$len" }
+        return (buf[at].toInt() and 0xFF) or
+            ((buf[at + 1].toInt() and 0xFF) shl 8) or
+            ((buf[at + 2].toInt() and 0xFF) shl 16) or
+            ((buf[at + 3].toInt() and 0xFF) shl 24)
     }
 
     fun toByteArray(): ByteArray = buf.copyOf(len)

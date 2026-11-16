@@ -232,15 +232,21 @@ class PoolInjectorTest {
             DexFormat.TYPE_CLASS_DEF_ITEM to buf.u32AsInt(DexFormat.H_CLASS_DEFS_OFF, "c"),
         )
 
-        var prevType = -1
+        // ⚠️ ART 的 CheckMap 只校验 **offset 严格递增**，不校验 type 顺序
+        // （原版 dex 的 map 也是 offset 序、type 乱序）。
+        // 之前这里断言「type 升序」是错的，会让合法产物被判失败。
+        var prevOff = -1
         val seen = mutableSetOf<Int>()
         for (i in 0 until mapCount) {
             val o = mapOff + 4 + i * DexFormat.MAP_ITEM_WIDTH
             val type = buf.u16(o)
             val size = buf.u32AsInt(o + 4, "size")
             val off = buf.u32AsInt(o + 8, "off")
-            assertTrue("map 必须按 type 升序，第 $i 项 type=$type < $prevType", type > prevType)
-            prevType = type
+            assertTrue(
+                "map 必须按 offset 升序，第 $i 项 offset=$off <= $prevOff（type=0x${type.toString(16)}）",
+                off > prevOff,
+            )
+            prevOff = off
             seen += type
 
             expected[type]?.let { exp ->

@@ -99,7 +99,6 @@ object FastInjector {
             val existing = DexPatcher.resolveMethodIndex(workDex, call.owner, call.name, sig)
             if (existing != null) continue
 
-            // 不在池里 → 池注入
             val poolResult = PoolInjector.addMethodRef(
                 workDex,
                 PoolInjector.MethodRefRequest(
@@ -118,7 +117,6 @@ object FastInjector {
                 is PoolInjector.Result.Failed ->
                     return Result.NotApplicable("池注入失败：${poolResult.reason}")
             }
-            // 池变大后 code_item 的位置不变（数据段没动），但保险起见重读
             reHeader = DexPatcher.codeHeader(
                 workDex, spec.ownerType, spec.methodName, spec.methodSignature
             ) ?: return Result.NotApplicable("池注入后找不到目标方法")
@@ -154,28 +152,47 @@ object FastInjector {
             warnings += "寄存器超出 v15 或超过 5 个，已自动改用 /range 形态"
         }
 
-        // ── 第三步：真正落笔改 code_item ──
-        val outcome = DexPatcher.replaceCode(
+        // ── 第三步：把 invoke 插进目标方法 ──
+        //
+        // 【为什么复用 PoolInjector 而不是 DexPatcher】
+        // DexPatcher 的做法是「原文件 + 末尾追加新 code_item」，这会同时违反
+        // ART 的四条布局约束（map 递增 / 物理顺序 / 段间零填充 / 同 type 连续），
+        // 而且让 code_item 之后所有段的绝对偏移失效 —— 那些偏移散落在
+        // string_ids、proto_ids、class_defs、annotation 等六七个结构里，
+        // 逐个补丁漏一处就是「找不到类」或闪退。
+        //
+        // PoolInjector 本来就要把**每个** code_item 重写一遍（debug_info_off 变了），
+        // 顺手换掉目标方法的指令，不增加任何额外的段移动。
+        //
+        // 代价是要多跑一遍池重排：第一次先确保新增方法进了池（才能编码出 method_idx），
+        // 第二次带上指令一起落盘。第二次池里已经有那个方法，不会重复添加。
+        val patched = PoolInjector.addMethodRef(
             workDex,
-            DexPatcher.ReplaceCodeRequest(
+            PoolInjector.MethodRefRequest(
+                owner = spec.calls.first().owner,
+                name = spec.calls.first().name,
+                paramTypes = spec.calls.first().paramTypes,
+                returnType = spec.calls.first().returnType,
+            ),
+            PoolInjector.InsnPatch(
                 classType = spec.ownerType,
                 methodName = spec.methodName,
-                methodSignature = spec.methodSignature,
-                prefixInsns = encoded.toShortArray(),
-            )
+                methodSig = spec.methodSignature,
+                newInsns = encoded.toShortArray(),
+            ),
         )
-        return when (outcome) {
-            is DexPatcher.Outcome.Ok -> Result.Injected(
-                dex = outcome.dex,
+        return when (patched) {
+            is PoolInjector.Result.Ok -> Result.Injected(
+                dex = patched.dex,
                 injectedCount = spec.calls.size,
                 warnings = warnings,
                 note = buildString {
                     if (poolInjected) append("池注入 + ")
-                    append("增量写入：${dexBytes.size} → ${outcome.newSize} 字节")
+                    append("指令注入：${dexBytes.size} → ${patched.dex.size} 字节")
                 },
             )
-            is DexPatcher.Outcome.Failed ->
-                Result.NotApplicable("增量写入失败：${outcome.reason}")
+            is PoolInjector.Result.Failed ->
+                Result.NotApplicable("增量写入失败：${patched.reason}")
         }
     }
 }

@@ -113,29 +113,30 @@ internal object InstructionRefRemapper {
                             if (i >= 0) out += Patch(
                                 idxOffset, i, Kind.STRING,
                                 wide = insn.codeUnits == 3 && !isRangeFmt,
+                                ownerCodeOff = oldCodeOff,
                             )
                         }
                         is TypeReference -> {
                             val i = typeIdx(ref.type)
-                            if (i >= 0) out += Patch(idxOffset, i, Kind.TYPE)
+                            if (i >= 0) out += Patch(idxOffset, i, Kind.TYPE, ownerCodeOff = oldCodeOff)
                         }
                         is FieldReference -> {
                             val i = fieldIdx(ref.definingClass, ref.name, ref.type)
-                            if (i >= 0) out += Patch(idxOffset, i, Kind.FIELD)
+                            if (i >= 0) out += Patch(idxOffset, i, Kind.FIELD, ownerCodeOff = oldCodeOff)
                         }
                         is MethodReference -> {
                             val i = methodIdx(
                                 ref.definingClass, ref.name,
                                 ref.parameterTypes.map { it.toString() }, ref.returnType,
                             )
-                            if (i >= 0) out += Patch(idxOffset, i, Kind.METHOD)
+                            if (i >= 0) out += Patch(idxOffset, i, Kind.METHOD, ownerCodeOff = oldCodeOff)
                         }
                         is MethodProtoReference -> {
                             val i = protoIdx(
                                 ref.parameterTypes.map { it.toString() }, ref.returnType,
                             )
                             // 45cc/4rcc 的 proto 索引固定在最后一字（+6）
-                            if (i >= 0) out += Patch(base + 6, i, Kind.PROTO)
+                            if (i >= 0) out += Patch(base + 6, i, Kind.PROTO, ownerCodeOff = oldCodeOff)
                         }
                         else -> Unit
                     }
@@ -148,14 +149,24 @@ internal object InstructionRefRemapper {
     /**
      * 写入重映射后的索引。
      *
+     * @param codeRange 允许写入的区间 `[start, end)`（code_item 段的范围）。
+     *                  越界的 patch 会直接报错——写到别的段上会把
+     *                  `type_list` 之类的数据覆盖成随机值，而所有段级自检都通过，
+     *                  只能靠 ART 报 `Bad index for type_list.type` 才发现。
      * @return 错误说明；null 表示成功
      */
     fun patch(
         out: GrowableBuffer,
         patches: List<Patch>,
         maps: EncodedValueRemapper.Maps,
+        codeRange: IntRange? = null,
     ): String? {
         for (p in patches) {
+            if (codeRange != null && p.absOffset !in codeRange) {
+                return "指令 patch 偏移 ${p.absOffset} 落在 code_item 段" +
+                    "[${codeRange.first}, ${codeRange.last}] 之外；" +
+                    "继续写会覆盖其它段的数据"
+            }
             val table = when (p.kind) {
                 Kind.STRING -> maps.stringMap
                 Kind.TYPE -> maps.typeMap

@@ -47,12 +47,23 @@ internal object TypeListRemapper {
             if (off <= 0 || off >= data.size) continue
             if (result.containsKey(off)) continue
             val size = runCatching { buf.u32AsInt(off, "type_list size") }.getOrNull() ?: continue
-            if (size < 0 || off + 4 + size * 2 > data.size) continue
+            // ⚠️ size 必须落在 type_ids 范围内：一个 type_list 的参数个数不可能超过
+            // type_ids 总数（每个参数都是一个 type）。没有这条校验时，
+            // 偏移算错会读出一个巨大的 size，写出去就是越界索引，
+            // ART 报 `Bad index for type_list.type: 56c >= 14e` 时已经很难回溯。
+            if (size < 0 || size > 0xFFFF) continue
+            if (off + 4 + size * 2 > data.size) continue
 
             val out = GrowableBuffer(4 + size * 2)
             out.u32(size.toLong())
             for (i in 0 until size) {
                 val oldType = buf.u16(off + 4 + i * 2)
+                if (oldType >= typeMap.size) {
+                    throw IllegalStateException(
+                        "type_list@$off 第 $i 个参数 type_idx=$oldType 超过 " +
+                            "type_ids 范围 ${typeMap.size}；说明该偏移不是 type_list 起点"
+                    )
+                }
                 out.u16(typeMap[oldType])
             }
             result[off] = sink(out.toByteArray())

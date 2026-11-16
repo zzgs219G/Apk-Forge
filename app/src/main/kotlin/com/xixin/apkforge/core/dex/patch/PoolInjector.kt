@@ -70,13 +70,42 @@ internal object PoolInjector {
     /**
      * 往 [dexBytes] 里加入 [ref] 所需的全部池条目，返回新 dex 与该方法的下标。
      */
-    fun addMethodRef(dexBytes: ByteArray, ref: MethodRefRequest): Result {
+    /**
+     * 要在重建 `code_item` 时**顺便**替换掉指令的方法。
+     *
+     * @param classType     目标类描述符，如 `Lcom/foo/Bar;`
+     * @param methodName    方法名
+     * @param methodSig     方法签名
+     * @param newInsns      新的指令序列（16 位字）。传 null 表示不改指令。
+     */
+    data class InsnPatch(
+        val classType: String,
+        val methodName: String,
+        val methodSig: String,
+        val newInsns: ShortArray,
+    )
+
+    fun addMethodRef(
+        dexBytes: ByteArray,
+        ref: MethodRefRequest,
+        insnPatch: InsnPatch? = null,
+    ): Result {
         val src = DexBuffer(dexBytes)
         runCatching { validate(src) }.getOrElse {
             return Result.Failed(it.message ?: "dex 头部校验失败")
         }
 
         return try {
+            // ── 0. 幂等：这个方法已经在池里就不重复添加 ──
+            // 【为什么必须有】注入分两步：第一次登记方法（拿到 method_idx 才能编码指令），
+            // 第二次带着指令落盘。第二次若再添加一遍，`method_ids` 会出现两条相同的
+            // `(class, name, proto)`，破坏严格递增，ART 报 `Out-of-order method_ids`。
+            // 这里记下「已存在」，后面合并池时复用它而不再追加。
+            val existingMethodIdx = DexPatcher.resolveMethodIndex(
+                dexBytes, ref.owner, ref.name,
+                "(" + ref.paramTypes.joinToString("") + ")" + ref.returnType,
+            )
+
             // ── 1. 读出现有各段 ──
             val sec = Sections.read(src)
 
@@ -179,7 +208,7 @@ internal object PoolInjector {
             val newReturnTypeIdx = typeIdx(ref.returnType)
             val newParamTypeIdx = ref.paramTypes.map { typeIdx(it) }
             val protoExists = sec.protos.any { p ->
-                val rp = p.remap(typeIndexMap)
+                val rp = p.remap(typeIndexMap, stringIndexMap)
                 rp.returnTypeIdx == newReturnTypeIdx && rp.paramTypeIdx == newParamTypeIdx
             }
             val newProtoEntry = ProtoEntry(
@@ -187,7 +216,7 @@ internal object PoolInjector {
                 returnTypeIdx = newReturnTypeIdx,
                 paramTypeIdx = newParamTypeIdx,
             )            // 旧条目：先重映射、再排序
-            val remappedProtos = sec.protos.map { it.remap(typeIndexMap) }
+            val remappedProtos = sec.protos.map { it.remap(typeIndexMap, stringIndexMap) }
             val protoIndexMap = IntArray(sec.protos.size)
             // 用「排序后的位置」反查
             val protoOrder = remappedProtos.withIndex()
@@ -230,8 +259,12 @@ internal object PoolInjector {
             val remappedMethods = sec.methods.map {
                 it.remap(typeIndexMap, protoIndexMap, stringIndexMap)
             }
-            // 把「新条目」追加在末尾，index = sec.methods.size 作为标记
-            val allMethodEntries = remappedMethods + newMethodEntry
+            // ⚠️ 方法已在池里（第二次调用）时**不再追加**，只重映射。
+            // 追加会让 method_ids 出现两条相同的 (class, name, proto)，
+            // 破坏严格递增，ART 报 `Out-of-order method_ids`。
+            val needNewMethod = (existingMethodIdx == null)
+            val allMethodEntries =
+                if (needNewMethod) remappedMethods + newMethodEntry else remappedMethods
             val methodOrder = allMethodEntries.withIndex()
                 .sortedWith { a, b -> a.value.compareTo(b.value) }
             val methodIndexMap = IntArray(sec.methods.size)
@@ -243,14 +276,12 @@ internal object PoolInjector {
                     newMethodIdx = newPos
                 }
             }
-            if (newMethodIdx < 0) return Result.Failed("无法定位新 method_idx")
-            // DIAG
-            run {
-                val target = allMethodEntries[sec.methods.size]
-                val actual = methodOrder[methodIndexMap.getOrElse(0) { 0 }].value
-                System.err.println("DIAG total=${allMethodEntries.size} newMethodIdx=$newMethodIdx")
-                System.err.println("DIAG target(class=${target.classIdx},name=${target.nameString},proto=${target.protoIdx})")
-                System.err.println("DIAG at189=${methodOrder.getOrNull(189)?.value}")
+            if (needNewMethod && newMethodIdx < 0) {
+                return Result.Failed("无法定位新 method_idx")
+            }
+            if (!needNewMethod) {
+                // 复用已有索引：它经重映射后的位置
+                newMethodIdx = methodIndexMap[existingMethodIdx!!]
             }
 
             // ── 9. 类定义：重映射所有索引 ──
@@ -258,90 +289,106 @@ internal object PoolInjector {
             val mergedClasses = sec.classDefs.map { cd ->
                 cd.remap(typeIndexMap, stringIndexMap)
             }
-            val classOrder = mergedClasses.withIndex().sortedWith { a, b ->
-                a.value.classIdx.compareTo(b.value.classIdx)
+            // ⚠️ class_defs 的排序有**两条**约束，必须同时满足：
+            //   1. class_idx 升序（ART 的 CheckIntraClassDefItem 逐项校验）
+            //   2. 父类与接口必须先于实现类出现（CheckClassDefOrdering）
+            //
+            // 只按 class_idx 排会漏掉第 2 条：池重排后 class_idx 的**数值**变了，
+            // 原本「父类在前」的巧合不再成立。实测 16722 个类里有 465 处违规，
+            // ART 报 `Invalid class definition ordering: class with type idx: '85'
+            // defined before implemented interface with type idx: '89'`。
+            //
+            // 做法：在 class_idx 升序的基础上做稳定拓扑排序 —— 按 class_idx 从小到大
+            // 尝试放置，若其父类/接口尚未放置则先放它们。
+            val classOrder = run {
+                val byIdx = LinkedHashMap<Int, IndexedValue<ClassDefEntry>>()
+                mergedClasses.withIndex().forEach { byIdx[it.value.classIdx] = it }
+                val placed = LinkedHashSet<Int>()
+                val ordered = ArrayList<IndexedValue<ClassDefEntry>>(mergedClasses.size)
+
+                fun place(idx: Int, visiting: MutableSet<Int>) {
+                    if (idx in placed || idx !in byIdx) return
+                    if (!visiting.add(idx)) return          // 环（畸形 dex）：直接放
+                    val e = byIdx.getValue(idx)
+                    val c = e.value
+                    if (c.superIdx >= 0) place(c.superIdx, visiting)
+                    // 接口列表在 interfacesOff 指向的 type_list 里，原样读出
+                    if (c.interfacesOff > 0) {
+                        runCatching {
+                            val n = src.u32AsInt(c.interfacesOff.toInt(), "ifaces_n")
+                            repeat(n) {
+                                val t = src.u16(c.interfacesOff.toInt() + 4 + it * 2)
+                                place(t, visiting)
+                            }
+                        }
+                    }
+                    visiting.remove(idx)
+                    if (placed.add(idx)) ordered += e
+                }
+                byIdx.keys.sorted().forEach { place(it, HashSet()) }
+                // 兜底：万一有元素没被放到（理论上不会），按原顺序补上
+                mergedClasses.withIndex().forEach { if (it.value.classIdx !in placed) ordered += it }
+                ordered
             }
 
             // ── 10. 拼装新文件 ──
-            val out = GrowableBuffer(dexBytes.size + 64 * 1024 + newStringsToAdd.size * 64)
-            out.bytes(dexBytes)          // 原文件原样拷贝（数据段一个字节不动）
+            //
+            // ⚠️ 这里不再是「原文件副本 + 不断追加」，而是**每个段各自缓冲**，
+            // 最后由 DexSectionLayout 按规范段序拼接。
+            //
+            // 旧写法在原文件副本后面追加：新字符串、新 code_item、新 class_data、
+            // 新 id 表全塞到末尾。这对 ART 有两条硬伤：
+            //
+            //   1. 搬走的内容原位置留下旧字节 → `Non-zero padding 5e at offset 0x70`
+            //   2. 同一 type 被拆成「原位置一段 + 末尾一段」→ `List too large for insns size`
+            //
+            // map 只记录「起点 + 个数」，无法表达「同 type 分散在多处」，
+            // 所以同 type 的 item 必须连续，段与段之间只能有全零填充。
+            //
+            // 每个段缓冲里记录的偏移是**段内相对偏移**，排版时统一回填成绝对偏移。
+
+            // 新的 string_data（原样 + 新增）
+            val stringDataBuf = GrowableBuffer(dexBytes.size / 2)
+            // 新的 type_list（重写后的）
+            val typeListBuf = GrowableBuffer(4096)
+            // 注解相关的四个独立段
+            val annotationItemBuf = GrowableBuffer(8192)
+            val annotationSetBuf = GrowableBuffer(4096)
+            val annotationSetRefBuf = GrowableBuffer(1024)
+            val annotationDirBuf = GrowableBuffer(4096)
+            // 重写后的 debug_info / code_item / class_data
+            val debugInfoBuf = GrowableBuffer(16384)
+            val codeItemBuf = GrowableBuffer(dexBytes.size / 2)
+            val classDataBuf = GrowableBuffer(dexBytes.size / 8)
+            // 静态初值 encoded_array
+            val encodedArrayBuf = GrowableBuffer(2048)
+
+            // ── 10a. string_data：原样复制所有旧项（偏移会变，稍后回填）──
+            // 旧 string_data 项是变长 MUTF-8（uleb128 长度 + 字节 + 结尾 0），
+            // 按 1 字节对齐，所以段内位置必须逐项累加。
+            // 这里不做解码→再编码的往返，直接搬原始字节区间，避免任何编码差异。
+            val oldStringDataOffsets = HashMap<Int, Int>()   // 旧偏移 → 段内偏移
+            sec.stringOffsets.forEach { oldOff ->
+                if (oldStringDataOffsets.containsKey(oldOff)) return@forEach
+                val (_, consumed) = Mutf8Codec.readOne(dexBytes, oldOff)
+                oldStringDataOffsets[oldOff] = stringDataBuf.position
+                stringDataBuf.bytes(dexBytes.copyOfRange(oldOff, oldOff + consumed))
+            }
 
             // 追加新字符串数据
             val newStringDataOffsets = HashMap<String, Int>()
             newStringsToAdd.forEach { s ->
-                out.align(1)
-                newStringDataOffsets[s] = out.position
-                out.bytes(Mutf8Codec.encodeItem(s))
+                newStringDataOffsets[s] = stringDataBuf.position
+                stringDataBuf.bytes(Mutf8Codec.encodeItem(s))
             }
 
-            // 旧 code_off → 新 code_off（带 try 的方法要重写整个 code_item）
+            // 旧 code_off → 新 code_off（段内偏移）
             val movedCodeItems = HashMap<Int, Int>()
 
-            // ── 10b-3. 重写带 try/catch 的 code_item ──
-            // `try_item` 的 exception_handler.type_idx 也是池下标，池重排后必须改，
-            // 否则 catch 到的异常类型完全错乱（实测 IllegalAccessException 变成 java.lang.Float）。
-            //
-            // 且 type_idx 是 uleb128，改后长度可能变，导致 handler_off 失效 ——
-            // 所以必须整体重编码整个 code_item 并追加到末尾。
-            run {
-                val codeOffsWithTries = HashSet<Int>()
-                sec.classDefs.forEach { cd ->
-                    if (cd.classDataOff == 0L) return@forEach
-                    val parsed = runCatching {
-                        ClassDataItem.parse(dexBytes, cd.classDataOff.toInt())
-                    }.getOrNull() ?: return@forEach
-                    parsed.directCodeOffsets.forEach { if (it > 0) codeOffsWithTries += it.toInt() }
-                    parsed.virtualCodeOffsets.forEach { if (it > 0) codeOffsWithTries += it.toInt() }
-                }
-                codeOffsWithTries.forEach { co ->
-                    if (co + DexFormat.CI_INSNS > dexBytes.size) return@forEach
-                    val r = TryBlockRemapper.remap(dexBytes, co, typeIndexMap) ?: return@forEach
-                    // 重建整个 code_item：头部 + 指令 + padding + tries + handlers
-                    val buf0 = src
-                    val insnsSize = buf0.u32AsInt(co + DexFormat.CI_INSNS_SIZE, "insns")
-                    val rewritten = GrowableBuffer(DexFormat.CI_INSNS + insnsSize * 2 + r.tries.size + r.handlers.size + 8)
-                    // 头部 16 字节原样（registers/ins/outs/tries/debug_off/insns_size）
-                    for (i in 0 until 16) rewritten.u8(dexBytes[co + i].toInt())
-                    // 指令区原样
-                    val insnsStart = co + DexFormat.CI_INSNS
-                    for (i in 0 until insnsSize * 2) rewritten.u8(dexBytes[insnsStart + i].toInt())
-                    // padding
-                    if ((insnsSize and 1) != 0) rewritten.u16(0)
-                    // 新的 tries 与 handlers
-                    rewritten.bytes(r.tries)
-                    rewritten.bytes(r.handlers)
-                    out.align(4)
-                    val newCo = out.position
-                    out.bytes(rewritten.toByteArray())
-                    // 记录「旧 code_off → 新 code_off」，供 class_data 回填
-                    movedCodeItems[co] = newCo
-                }
-            }
-
-            // ── 10b. 重写所有 class_data_item ──
-            // 池里插了新条目，后面所有下标都偏移了，而 class_data_item 存的是下标。
-            // 且它们是变长差分编码，只能整体重编码后追加到文件末尾。
-            val remapMaps = ClassDataRemapper.Maps(
-                fieldMap = fieldIndexMap,
-                methodMap = methodIndexMap,
-                codeOffMap = movedCodeItems,
-            )
-            val newClassDataOffsets = HashMap<Int, Int>()   // 旧偏移 → 新偏移
-            sec.classDefs.forEach { cd ->
-                val old = cd.classDataOff
-                if (old == 0L) return@forEach
-                val oldOff = old.toInt()
-                val cached = newClassDataOffsets[oldOff]
-                if (cached != null) return@forEach
-                val rewritten = ClassDataRemapper.remap(dexBytes, oldOff, remapMaps)
-                out.align(4)
-                newClassDataOffsets[oldOff] = out.position
-                out.bytes(rewritten)
-            }
-
-            // ── 10b-2. 重写注解 ──
-            // 注解里是 type_idx + 元素名的 string_idx + 元素值，池重排后全部错位。
-            // 表现：@kotlin.Metadata 变成 @java.util.Iterator，Kotlin 反射与 Compose 全废。
+            // ── 10b-3. 重写 debug_info（必须先于 code_item，因为要回填 debug_info_off）──
+            // debug_info 里有局部变量名（string_idx）与类型（type_idx），池重排后错位。
+            // 它只影响崩溃栈的行号与变量名，但会让严格解析器（jadx）整段失败，
+            // 也会让真机上的堆栈信息变成乱码。
             val evMaps = EncodedValueRemapper.Maps(
                 stringMap = stringIndexMap,
                 typeMap = typeIndexMap,
@@ -349,55 +396,241 @@ internal object PoolInjector {
                 methodMap = methodIndexMap,
                 protoMap = protoIndexMap,
             )
+            val debugInfoCache = HashMap<Int, Int>()   // 旧偏移 → 段内偏移
+            // 收集所有 code_item 的旧偏移（debug_info 与 code_item 都要重建）
+            val codeItemsToBuild = LinkedHashSet<Int>()
+            sec.classDefs.forEach { cd ->
+                if (cd.classDataOff == 0L) return@forEach
+                val parsed = runCatching {
+                    ClassDataItem.parse(dexBytes, cd.classDataOff.toInt())
+                }.getOrNull() ?: return@forEach
+                parsed.directCodeOffsets.forEach { if (it > 0) codeItemsToBuild += it.toInt() }
+                parsed.virtualCodeOffsets.forEach { if (it > 0) codeItemsToBuild += it.toInt() }
+            }
+            codeItemsToBuild.forEach { co ->
+                if (co + DexFormat.CI_INSNS > dexBytes.size) return@forEach
+                val dbgOff = src.u32AsInt(co + DexFormat.CI_DEBUG_INFO_OFF, "dbg")
+                if (dbgOff == 0) return@forEach
+                if (debugInfoCache.containsKey(dbgOff)) return@forEach
+                val bytes = DebugInfoRemapper.remap(dexBytes, dbgOff, evMaps)
+                if (bytes.isEmpty()) {
+                    return Result.Failed("debug_info@$dbgOff 重写后为空，无法写入")
+                }
+                // ⚠️ debug_info_item 是 **1 字节对齐**（见 ART 的
+                // CheckIntraSectionIterate / CheckMap 里 alignment 判定）。
+                // 这里千万不能 align(4)：那会在项之间插入填充字节，
+                // 而 ART 是按「起点 + 项数」**紧密**遍历整段的，
+                // 填充会让后续每一项的起点都偏移，报
+                // `Bad index for debug_info_item parameter_name: 3486 >= 735`
+                // —— 那两个数字跟真实数据毫无关系，极难反推。
+                debugInfoCache[dbgOff] = debugInfoBuf.position
+                debugInfoBuf.bytes(bytes)
+            }
+
+            // 自检：每个写入的 debug_info 都必须真的被某个 code_item 引用到。
+            // 写入时是按 codeItemsToBuild 收集的，理论上必然被引用；
+            // 但若有 code_item 因越界被跳过，就会留下孤儿项 ——
+            // ART 顺序遍历整段时会整体错位，
+            // 报 `Bad index for debug_info_item parameter_name: 3486 >= 735`。
+            run {
+                val actuallyRef = HashSet<Int>(debugInfoCache.size * 2)
+                val validCo = codeItemsToBuild.filter {
+                    it + DexFormat.CI_INSNS <= dexBytes.size
+                }
+                validCo.forEach { co ->
+                    val d = src.u32AsInt(co + DexFormat.CI_DEBUG_INFO_OFF, "dbg")
+                    if (d != 0) actuallyRef += d
+                }
+                val orphanKeys = debugInfoCache.keys.filter { it !in actuallyRef }
+                if (orphanKeys.isNotEmpty()) {
+                    return Result.Failed(
+                        "debug_info 里有 ${orphanKeys.size} 项对应的 code_item 已被跳过" +
+                            "（如 ${orphanKeys.take(3)}），会成为孤儿项"
+                    )
+                }
+            }
+
+            // ── 10b-3a. 定位「要替换指令」的那个 code_item ──
+            // 注入要做两件事：把调用方法登记进池（上面已完成），
+            // 以及把 invoke 指令插进目标方法的**第一条指令之前**。
+            // 后者必须在重建 code_item 时顺路做：反正每个 code_item 都要重写一遍
+            // （debug_info_off 变了），单独再走一遍只会多一次段移动、多一处出错机会。
+            val patchCodeOff: Int = if (insnPatch != null) {
+                // 复用 DexPatcher 已有的「按类名 + 方法名 + 签名定位 code_off」逻辑，
+                // 不在这里再实现一遍（重复实现必然两处不一致）。
+                val header = DexPatcher.codeHeader(
+                    dexBytes, insnPatch.classType, insnPatch.methodName, insnPatch.methodSig,
+                ) ?: return Result.Failed(
+                    "${insnPatch.classType} 里没有带方法体的 " +
+                        "${insnPatch.methodName}${insnPatch.methodSig}"
+                )
+                if (DexPatcher.hasTryBlocks(dexBytes, header.codeOff)) {
+                    // 带 try 的方法要重算所有 try 项的指令偏移，本路径不做
+                    return Result.Failed(
+                        "${insnPatch.methodName} 带 try/catch 块，当前注入路径不支持；" +
+                            "请改用全量重写"
+                    )
+                }
+                header.codeOff
+            } else -1
+
+            // ── 10b-3b. 重建**所有** code_item ──
+            //
+            // ⚠️ 这里从「只重建带 try 的」改成「全部重建」。原因：
+            // 段重排后 code_item 的物理位置整体变了，所有 code_off 都必须重新计算；
+            // 而且 code_item 内部有 debug_info_off 要改，原地补丁也不再可行。
+            //
+            // 段序照抄 dexlib2 的 DexWriter.writeTo()——它写出的文件必然通过 ART 校验。
+            // 这个顺序既决定物理布局，也决定 map 的排列，两处必须完全一致。
+            val sectionOrder = listOf(
+                DexFormat.TYPE_STRING_ID_ITEM,
+                DexFormat.TYPE_TYPE_ID_ITEM,
+                DexFormat.TYPE_PROTO_ID_ITEM,
+                DexFormat.TYPE_FIELD_ID_ITEM,
+                DexFormat.TYPE_METHOD_ID_ITEM,
+                DexFormat.TYPE_CLASS_DEF_ITEM,
+                DexFormat.TYPE_STRING_DATA_ITEM,
+                DexFormat.TYPE_TYPE_LIST,
+                DexFormat.TYPE_ENCODED_ARRAY_ITEM,
+                DexFormat.TYPE_ANNOTATION_ITEM,
+                DexFormat.TYPE_ANNOTATION_SET_ITEM,
+                DexFormat.TYPE_ANNOTATION_SET_REF_LIST,
+                DexFormat.TYPE_ANNOTATIONS_DIRECTORY_ITEM,
+                DexFormat.TYPE_DEBUG_INFO_ITEM,
+                DexFormat.TYPE_CODE_ITEM,
+                DexFormat.TYPE_CLASS_DATA_ITEM,
+            )
+            //
+            // 重建时做三件事：
+            //   1. debug_info_off → 新位置
+            //   2. 指令里的池索引 → 新下标（后面统一回填）
+            //   3. 带 try 的：try_item 的 exception_handler.type_idx 也是池下标，
+            //      而 type_idx 是 uleb128，改后长度可能变、handler_off 会失效，
+            //      所以整个 tries+handlers 必须重编码
+            //
+            // 除这三处外，指令字节与其它头部字段原样搬运，不做任何重新编码。
+            // try 的重写结果先算好（它决定 code_item 的尾部字节）
+            val tryRewrites = HashMap<Int, TryBlockRemapper.Result>()
+            codeItemsToBuild.forEach { co ->
+                if (co + DexFormat.CI_INSNS > dexBytes.size) return@forEach
+                TryBlockRemapper.remap(dexBytes, co, typeIndexMap)?.let { tryRewrites[co] = it }
+            }
+
+            codeItemsToBuild.forEach { co ->
+                if (co + DexFormat.CI_INSNS > dexBytes.size) return@forEach
+                val insnsSize = src.u32AsInt(co + DexFormat.CI_INSNS_SIZE, "insns")
+                if (co + DexFormat.CI_INSNS + insnsSize * 2 > dexBytes.size) return@forEach
+
+                val triesSize = src.u16(co + DexFormat.CI_TRIES_SIZE)
+                val r = tryRewrites[co]
+
+                codeItemBuf.align(4)
+                val newCo = codeItemBuf.position
+                movedCodeItems[co] = newCo
+
+                // 头部 16 字节：只有 debug_info_off 需要换
+                val oldDbg = src.u32AsInt(co + DexFormat.CI_DEBUG_INFO_OFF, "dbg")
+                // ⚠️ 写「段内偏移 + 1」，0 表示「没有 debug_info」。
+                // 段的第一项段内偏移就是 0，直接用 0 会和「无」冲突：
+                // 回填时看到 0 就跳过，那第一项永远填不进去，成为孤儿项——
+                // ART 顺序遍历 debug_info 段时整体错位，报
+                // `Bad index for debug_info_item parameter_name: 3486 >= 735`。
+                val newDbg = if (oldDbg != 0) {
+                    val rel = debugInfoCache[oldDbg]
+                        ?: return Result.Failed(
+                            "code_item@$co 的 debug_info@$oldDbg 没有重写结果"
+                        )
+                    rel + 1
+                } else 0
+                codeItemBuf.u16(src.u16(co + DexFormat.CI_REGISTERS_SIZE))
+                codeItemBuf.u16(src.u16(co + DexFormat.CI_INS_SIZE))
+                codeItemBuf.u16(src.u16(co + DexFormat.CI_OUTS_SIZE))
+                codeItemBuf.u16(triesSize)
+                codeItemBuf.u32(newDbg.toLong())
+                // 指令区：目标方法在最前面插入新指令，原指令接在后面
+                val isPatchTarget = (co == patchCodeOff)
+                val prefix = if (isPatchTarget) insnPatch!!.newInsns else null
+                // ⚠️ insns_size 必须是**总条数**（新指令 + 原指令）。
+                // 只写新指令数会让 ART 认为这个方法只剩那几条指令，
+                // 于是它按错误长度推进，撞到下一项的起始字节上报
+                // `Non-zero padding ... before section of type 8193`。
+                val totalInsns = (prefix?.size ?: 0) + insnsSize
+                codeItemBuf.u32(totalInsns.toLong())
+                prefix?.forEach { codeItemBuf.u16(it.toInt() and 0xFFFF) }
+                codeItemBuf.bytes(
+                    dexBytes.copyOfRange(co + DexFormat.CI_INSNS, co + DexFormat.CI_INSNS + insnsSize * 2)
+                )
+                // tries 区
+                if (triesSize > 0) {
+                    // 奇数条指令后要补 2 字节，tries 区才是 4 对齐
+                    if ((totalInsns and 1) != 0) codeItemBuf.u16(0)
+                    if (r != null) {
+                        codeItemBuf.bytes(r.tries)
+                        codeItemBuf.bytes(r.handlers)
+                    } else {
+                        return Result.Failed("code_item@$co 有 tries 但重映射失败，产物会非法")
+                    }
+                }
+                // code_item 按 4 对齐，写完补对齐（下一项起点必须 4 对齐）
+                codeItemBuf.align(4)
+            }
+
+            // ── 10b. class_data 的重写留到 11c ──
+            // class_data 里的 `code_off` 是 uleb128 变长字段，必须写成**最终绝对偏移**，
+            // 排版后无法原地补丁。而 code_item 段基址依赖后面几个段的大小，
+            // 所以等各段都产出完再统一生成。
+
+            // ── 10b-2. 重写注解 ──
+            // 注解里是 type_idx + 元素名的 string_idx + 元素值，池重排后全部错位。
+            // 表现：@kotlin.Metadata 变成 @java.util.Iterator，Kotlin 反射与 Compose 全废。
+            //
+            // 四种结构必须各自成段、各自连续（ART 要求同 type 连续）：
+            //   annotation_item → annotation_set_item → annotation_set_ref_list
+            //   → annotations_directory_item
             val annotationCache = HashMap<Int, Int>()
             val newAnnotationsOffsets = HashMap<Int, Int>()
+            var annotationItemCount = 0
+            var annotationSetCount = 0
+            var annotationSetRefCount = 0
+            val annSink = object : AnnotationRemapper.Sink {
+                override fun item(bytes: ByteArray): Int {
+                    annotationItemBuf.align(1)
+                    val p = annotationItemBuf.position
+                    annotationItemBuf.bytes(bytes)
+                    annotationItemCount++
+                    // annotation_item 按 1 对齐（ART 规定），无需补
+                    return p
+                }
+
+                override fun set(bytes: ByteArray): Int {
+                    annotationSetBuf.align(4)
+                    val p = annotationSetBuf.position
+                    annotationSetBuf.bytes(bytes)
+                    annotationSetBuf.align(4)      // 每项起点必须 4 对齐
+                    annotationSetCount++
+                    return p
+                }
+
+                override fun refList(bytes: ByteArray): Int {
+                    annotationSetRefBuf.align(4)
+                    val p = annotationSetRefBuf.position
+                    annotationSetRefBuf.bytes(bytes)
+                    annotationSetRefBuf.align(4)
+                    annotationSetRefCount++
+                    return p
+                }
+            }
             sec.classDefs.forEach { cd ->
                 if (cd.annotationsOff == 0L) return@forEach
                 val dirOff = cd.annotationsOff.toInt()
                 if (newAnnotationsOffsets.containsKey(dirOff)) return@forEach
                 val bytes = AnnotationRemapper.remapDirectory(
-                    dexBytes, dirOff, evMaps, annotationCache
-                ) { b ->
-                    out.align(4)
-                    val pos = out.position
-                    out.bytes(b)
-                    pos
-                }
-                out.align(4)
-                newAnnotationsOffsets[dirOff] = out.position
-                out.bytes(bytes)
-            }
-
-            // ── 10b-4. 重写 debug_info ──
-            // debug_info 里有局部变量名（string_idx）与类型（type_idx），池重排后错位。
-            // 它只影响崩溃栈的行号与变量名，但会让严格解析器（jadx）整段失败，
-            // 也会让真机上的堆栈信息变成乱码。
-            val debugInfoCache = HashMap<Int, Int>()   // 旧偏移 → 新偏移
-            run {
-                val codeOffs = HashSet<Int>()
-                sec.classDefs.forEach { cd ->
-                    if (cd.classDataOff == 0L) return@forEach
-                    val parsed = runCatching {
-                        ClassDataItem.parse(dexBytes, cd.classDataOff.toInt())
-                    }.getOrNull() ?: return@forEach
-                    parsed.directCodeOffsets.forEach { if (it > 0) codeOffs += it.toInt() }
-                    parsed.virtualCodeOffsets.forEach { if (it > 0) codeOffs += it.toInt() }
-                }
-                codeOffs.forEach { co ->
-                    if (co + DexFormat.CI_INSNS > dexBytes.size) return@forEach
-                    val dbgOff = src.u32AsInt(co + DexFormat.CI_DEBUG_INFO_OFF, "dbg")
-                    if (dbgOff == 0) return@forEach
-                    val newOff = debugInfoCache[dbgOff] ?: run {
-                        val bytes = DebugInfoRemapper.remap(dexBytes, dbgOff, evMaps)
-                        out.align(4)
-                        val pos = out.position
-                        out.bytes(bytes)
-                        debugInfoCache[dbgOff] = pos
-                        pos
-                    }
-                    // code_item 在数据段没搬运，原位改它的 debug_info_off
-                    out.patchU32(co + DexFormat.CI_DEBUG_INFO_OFF, newOff.toLong())
-                }
+                    dexBytes, dirOff, evMaps, annotationCache, annSink
+                )
+                annotationDirBuf.align(4)
+                val p = annotationDirBuf.position
+                annotationDirBuf.bytes(bytes)
+                newAnnotationsOffsets[dirOff] = p
             }
 
             // code_item 的指令区原样保留，但里面的 string_idx 是池下标。
@@ -473,6 +706,7 @@ internal object PoolInjector {
             // 而 type_list 里存的是 type_idx（u16）—— type_ids 重排后它们全部失效。
             // 不修这一处，读出来的方法签名会完全不对，表现为「找不到目标方法」。
             val typeListOffsets = LinkedHashSet<Int>()
+            var typeListCount = 0
             sec.protos.forEach { p ->
                 if (p.parametersOff > 0 && p.parametersOff < Int.MAX_VALUE) {
                     typeListOffsets += p.parametersOff.toInt()
@@ -483,83 +717,214 @@ internal object PoolInjector {
                     typeListOffsets += c.interfacesOff.toInt()
                 }
             }
+            // 自检：每个 offsets 都必须是**真正的** type_list 起点。
+            // 判据：把原包 type_list 段按物理顺序逐项展开，收集所有起点。
+            // 混进非起点时（例如某个 proto 的 parameters_off 越界），
+            // 会读出一个荒唐的 size，写得下去但 ART 报
+            // `Bad index for type_list.type`，且极难回溯。
+            run {
+                val oldMapOff = src.u32AsInt(DexFormat.H_MAP_OFF, "map_off")
+                val mapCount = src.u32AsInt(oldMapOff, "map_count")
+                var tlStart = -1
+                var tlCount = 0
+                for (k in 0 until mapCount) {
+                    val mo = oldMapOff + 4 + k * DexFormat.MAP_ITEM_WIDTH
+                    if (src.u16(mo) == DexFormat.TYPE_TYPE_LIST) {
+                        tlStart = src.u32AsInt(mo + 8, "tl_off")
+                        tlCount = src.u32AsInt(mo + 4, "tl_count")
+                        break
+                    }
+                }
+                if (tlStart > 0) {
+                    val valid = HashSet<Int>(tlCount * 2)
+                    var q = tlStart
+                    repeat(tlCount) {
+                        valid += q
+                        val n = src.u32AsInt(q, "tl_n")
+                        q += 4 + n * 2
+                        q = (q + 3) and 3.inv()
+                    }
+                    val bogus = typeListOffsets.filter { it !in valid }
+                    if (bogus.isNotEmpty()) {
+                        return Result.Failed(
+                            "有 ${bogus.size} 个 type_list 偏移不是真正的起点" +
+                                "（如 ${bogus.take(3)}）；说明 proto.parameters_off 或 " +
+                                "class_def.interfaces_off 指向了非法位置"
+                        )
+                    }
+                }
+            }
+            val typeListItemOffsets = ArrayList<Int>()
             val newTypeListOffsets = TypeListRemapper.remapAll(
                 dexBytes, typeIndexMap, typeListOffsets
             ) { bytes ->
-                out.align(4)
-                val pos = out.position
-                out.bytes(bytes)
+                typeListBuf.align(4)
+                val pos = typeListBuf.position
+                typeListBuf.bytes(bytes)
+                // ⚠️ type_list 的长度是 `4 + size*2`，size 为奇数时会落在 2 mod 4 上。
+                // ART 的 CheckMap 要求每个 item 的 offset 按 4 对齐（data 段里
+                // 除 string_data/debug_info/annotation/class_data/encoded_array 外都是 4），
+                // 所以**写完立刻补对齐**，而不是等下个 item 开始前再补——
+                // 后者会让「上一个 item 的尾部」把填充算进去，导致读回的大小错位。
+                typeListBuf.align(4)
+                typeListCount++
+                typeListItemOffsets += pos
                 pos
             }
 
             // 新 proto 的参数列表：旧 dex 里没有对应的 type_list，必须新建一个
             // （参数用的是**新** type_idx）。空参数时 parametersOff 保持 0。
-            val newProtoParamsOff: Long = if (newProtoEntry.paramTypeIdx.isEmpty()) {
-                0L
-            } else {
-                val tl = GrowableBuffer(4 + newProtoEntry.paramTypeIdx.size * 2)
-                tl.u32(newProtoEntry.paramTypeIdx.size.toLong())
-                newProtoEntry.paramTypeIdx.forEach { tl.u16(it) }
-                out.align(4)
-                val pos = out.position
-                out.bytes(tl.toByteArray())
-                pos.toLong()
+            // ⚠️ 只有真的新增了 proto 才写——`protoExists` 为真时复用旧条目，
+            // 多写一个没人引用的 type_list 就是孤儿项。
+            val newProtoParamsOff: Long =
+                if (protoExists || newProtoEntry.paramTypeIdx.isEmpty()) {
+                    0L
+                } else {
+                    val tl = GrowableBuffer(4 + newProtoEntry.paramTypeIdx.size * 2)
+                    tl.u32(newProtoEntry.paramTypeIdx.size.toLong())
+                    newProtoEntry.paramTypeIdx.forEach { tl.u16(it) }
+                    typeListBuf.align(4)
+                    val pos = typeListBuf.position
+                    typeListBuf.bytes(tl.toByteArray())
+                    typeListBuf.align(4)
+                    typeListCount++
+                    typeListItemOffsets += pos
+                    pos.toLong()
+                }
+
+            // 有孤儿说明「写了却没人引用」——ART 会报 `Bad index for type_list.type`，
+            // 但那时已经很难定位是谁多写的，所以这里提前拦。
+            run {
+                val referenced = HashSet<Int>(newTypeListOffsets.values)
+                if (newProtoParamsOff > 0) referenced += newProtoParamsOff.toInt()
+                val orphans = typeListItemOffsets.filter { it !in referenced }
+                if (orphans.isNotEmpty()) {
+                    return Result.Failed(
+                        "type_list 段里有 ${orphans.size} 个孤儿项（段内偏移 ${orphans.take(3)}），" +
+                            "说明写入了没有 proto/interfaces 引用的项"
+                    )
+                }
             }
 
-            // 新的 string_ids 数组
-            out.align(4)
-            val stringIdsOff = out.position
+            run {
+                // 写入项数 = remapAll 的项数 + 新增 proto 的 type_list（若有）
+                val expected = newTypeListOffsets.size + if (newProtoParamsOff > 0) 1 else 0
+                if (typeListItemOffsets.size != expected) {
+                    return Result.Failed(
+                        "type_list 写入项数 ${typeListItemOffsets.size} 与预期 $expected 不一致" +
+                            "（映射表 ${newTypeListOffsets.size} + 新增 ${if (newProtoParamsOff > 0) 1 else 0}）"
+                    )
+                }
+                // ⚠️ 每个项必须有**唯一**起点。起点重复说明后写的内容覆盖了前面的，
+                // 映射表里就有多个 key 指向同一处，段内布局必然崩。
+                val dup = typeListItemOffsets.groupingBy { it }.eachCount().filter { it.value > 1 }
+                if (dup.isNotEmpty()) {
+                    return Result.Failed(
+                        "type_list 段内有 ${dup.size} 处起点重复（如 ${dup.keys.take(3)}），" +
+                            "说明写入位置互相覆盖"
+                    )
+                }
+            }
+
+            // 自检：段内每个 type_list 的 type_idx 都必须落在 type_ids 范围内。
+            run {
+                val seg = typeListBuf.toByteArray()
+                val typeCount = mergedTypeStringIdx.size
+                newTypeListOffsets.values.sorted().forEach { rel ->
+                    if (rel + 4 > seg.size) {
+                        return Result.Failed("type_list 段内偏移 $rel 越界（段长 ${seg.size}）")
+                    }
+                    val n = (seg[rel].toInt() and 0xFF) or
+                        ((seg[rel + 1].toInt() and 0xFF) shl 8) or
+                        ((seg[rel + 2].toInt() and 0xFF) shl 16) or
+                        ((seg[rel + 3].toInt() and 0xFF) shl 24)
+                    if (n < 0 || rel + 4 + n * 2 > seg.size) {
+                        return Result.Failed(
+                            "type_list@段内$rel 的 size=$n 超出段长 ${seg.size}；" +
+                                "说明段内布局错位"
+                        )
+                    }
+                    for (j in 0 until n) {
+                        val v = (seg[rel + 4 + j * 2].toInt() and 0xFF) or
+                            ((seg[rel + 5 + j * 2].toInt() and 0xFF) shl 8)
+                        if (v >= typeCount) {
+                            return Result.Failed(
+                                "type_list@段内$rel 第 $j 个 type_idx=$v 超过 " +
+                                    "type_ids 大小 $typeCount"
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ── 11. 产出各 id 表（写入各自的缓冲，偏移在排版时确定）──
             // ⚠️ 这里必须用 HashMap 查偏移，不能 indexOf——
             // 8.5 万个字符串 × 线性查找 = 72 亿次比较，实测要 14 秒（比全量还慢）。
             val oldStringOffByValue = HashMap<String, Int>(oldStrings.size * 2)
             oldStrings.forEachIndexed { i, s -> oldStringOffByValue.putIfAbsent(s, sec.stringOffsets[i]) }
+
+            // string_ids：指向新 string_data 段内偏移（排版后回填绝对值）
+            val stringIdsBuf = GrowableBuffer(mergedStrings.size * 4)
             mergedStrings.forEach { s ->
-                val off = newStringDataOffsets[s] ?: oldStringOffByValue[s]
-                    ?: error("字符串 '$s' 找不到数据偏移")
-                out.u32(off.toLong())
+                val newOff = newStringDataOffsets[s]
+                if (newOff != null) {
+                    stringIdsBuf.u32(newOff.toLong())        // 新字符串：段内偏移
+                } else {
+                    val oldOff = oldStringOffByValue[s] ?: error("字符串 '$s' 找不到数据偏移")
+                    stringIdsBuf.u32((oldStringDataOffsets[oldOff] ?: 0).toLong())
+                }
             }
+            // ⚠️ string_ids 的每项都必须非 0（string_data_off 为 0 是非法值），
+            // 所以这里不需要哨兵；但段内偏移 0 是合法的第一项，
+            // 回填时统一加段基址即可（见 12a，那里不做「0 跳过」判断）。
 
-            // 新的 type_ids
-            out.align(4)
-            val typeIdsOff = out.position
-            mergedTypeStringIdx.forEach { out.u32(it.toLong()) }
+            // type_ids
+            val typeIdsBuf = GrowableBuffer(mergedTypeStringIdx.size * 4)
+            mergedTypeStringIdx.forEach { typeIdsBuf.u32(it.toLong()) }
 
-            // 新的 proto_ids
-            out.align(4)
-            val protoIdsOff = out.position
-            mergedProtos.forEach { p ->
-                out.u32(p.shortyString.toLong())
-                out.u32(p.returnTypeIdx.toLong())
+            // proto_ids
+            val protoIdsBuf = GrowableBuffer(mergedProtos.size * 12)
+            mergedProtos.forEachIndexed { pIdx, p ->
+                protoIdsBuf.u32(p.shortyString.toLong())
+                protoIdsBuf.u32(p.returnTypeIdx.toLong())
                 // parameters_off：新 proto 用自己的新 type_list，旧 proto 用重映射后的
-                val newParams: Long = if (p === newProtoEntry) {
-                    newProtoParamsOff
+                // ⚠️ 这里必须按**下标**判断是不是新 proto，不能用 `p === newProtoEntry`：
+                // `protoExists` 为真时列表里没有那个对象，`===` 永不成立，
+                // 结果新 type_list 写了却没人引用 → 产物里出现孤儿项，
+                // ART 报 `Bad index for type_list.type`。
+                val newParams: Long = if (pIdx == newProtoIdx && !protoExists) {
+                    // 新 type_list 的段内偏移 +1（0 表示没有参数）
+                    newProtoParamsOff + 1
                 } else if (p.parametersOff > 0) {
-                    (newTypeListOffsets[p.parametersOff.toInt()] ?: p.parametersOff.toInt()).toLong()
+                    val m = newTypeListOffsets[p.parametersOff.toInt()]
+                        ?: return Result.Failed(
+                            "proto 的 type_list@${p.parametersOff} 未重映射；" +
+                                "继续写会产出越界索引"
+                        )
+                    m.toLong() + 1
                 } else {
                     0L
                 }
-                out.u32(newParams)
+                protoIdsBuf.u32(newParams)
             }
 
-            // 新的 field_ids
-            out.align(4)
-            val fieldIdsOff = out.position
+            // field_ids
+            val fieldIdsBuf = GrowableBuffer(fieldOrder.size * 8)
             fieldOrder.forEach { e ->
-                out.u16(e.value.classIdx)
-                out.u16(e.value.typeIdx)
-                out.u32(e.value.nameIdx.toLong())
+                fieldIdsBuf.u16(e.value.classIdx)
+                fieldIdsBuf.u16(e.value.typeIdx)
+                fieldIdsBuf.u32(e.value.nameIdx.toLong())
             }
 
-            // 新的 method_ids
-            out.align(4)
-            val methodIdsOff = out.position
+            // method_ids
+            val methodIdsBuf = GrowableBuffer(methodOrder.size * 8)
             methodOrder.forEach { e ->
-                out.u16(e.value.classIdx)
-                out.u16(e.value.protoIdx)
-                out.u32(e.value.nameString.toLong())
+                methodIdsBuf.u16(e.value.classIdx)
+                methodIdsBuf.u16(e.value.protoIdx)
+                methodIdsBuf.u32(e.value.nameString.toLong())
             }
 
-            // ── static_values：静态字段初值也是池下标 ──
+            // ── 11a. static_values：静态字段初值也是池下标 ──
             // `static final String X = "..."` 的初值存在 encoded_array 里，
             // 元素是 string_idx / type_idx。不改的话常量会变成别的内容
             // —— 实测 `"android:support:activity-result"` 变成了
@@ -580,116 +945,296 @@ internal object PoolInjector {
                 repeat(cnt2.toInt()) {
                     q = EncodedValueRemapper.readAndWrite(dexBytes, q, tmp, evMaps)
                 }
-                out.align(4)
-                newStaticValuesOffsets[oldOff] = out.position
-                out.bytes(tmp.toByteArray())
+                // ⚠️ encoded_array_item 是 **1 字节对齐**的段（ART 的
+                // CheckIntraSectionIterate 里 alignment = 1）。
+                // 这里 align(4) 会在项之间插填充，而 ART 是紧密遍历整段的，
+                // 于是后续每项起点都偏移，报
+                // `Non-zero padding 1 before section of type 8196`。
+                newStaticValuesOffsets[oldOff] = encodedArrayBuf.position
+                encodedArrayBuf.bytes(tmp.toByteArray())
             }
 
-            // 新的 class_defs
-            out.align(4)
-            val classDefsOff = out.position
+            // ── 11c. 生成 class_data（需要 code_item 段的绝对基址）──
+            // class_data 里的 `code_off` 是 uleb128 变长字段，必须是**最终绝对偏移**，
+            // 排版后无法原地补丁。此时 code_item 段之前的所有段都已产出完毕，
+            // 按 sectionOrder 顺序累加就能得到它的基址。
+            val codeItemBase = DexSectionLayout.offsetOf(
+                DexFormat.HEADER_SIZE,
+                sectionOrder,
+                mapOf(
+                    DexFormat.TYPE_STRING_ID_ITEM to mergedStrings.size * 4,
+                    DexFormat.TYPE_TYPE_ID_ITEM to mergedTypeStringIdx.size * 4,
+                    DexFormat.TYPE_PROTO_ID_ITEM to mergedProtos.size * 12,
+                    DexFormat.TYPE_FIELD_ID_ITEM to fieldOrder.size * 8,
+                    DexFormat.TYPE_METHOD_ID_ITEM to methodOrder.size * 8,
+                    DexFormat.TYPE_CLASS_DEF_ITEM to classOrder.size * DexFormat.CLASS_DEF_WIDTH,
+                    DexFormat.TYPE_STRING_DATA_ITEM to stringDataBuf.size,
+                    DexFormat.TYPE_TYPE_LIST to typeListBuf.size,
+                    DexFormat.TYPE_ENCODED_ARRAY_ITEM to encodedArrayBuf.size,
+                    DexFormat.TYPE_ANNOTATION_ITEM to annotationItemBuf.size,
+                    DexFormat.TYPE_ANNOTATION_SET_ITEM to annotationSetBuf.size,
+                    DexFormat.TYPE_ANNOTATION_SET_REF_LIST to annotationSetRefBuf.size,
+                    DexFormat.TYPE_ANNOTATIONS_DIRECTORY_ITEM to annotationDirBuf.size,
+                    DexFormat.TYPE_DEBUG_INFO_ITEM to debugInfoBuf.size,
+                    DexFormat.TYPE_CODE_ITEM to codeItemBuf.size,
+                ),
+                DexFormat.TYPE_CODE_ITEM,
+            )
+            if (codeItemBase < 0) {
+                return Result.Failed("算不出 code_item 段基址，无法确定 class_data 的 code_off")
+            }
+            val absCodeOffMap = HashMap<Int, Int>(movedCodeItems.size * 2)
+            movedCodeItems.forEach { (oldOff, relOff) -> absCodeOffMap[oldOff] = codeItemBase + relOff }
+            val remapMaps = ClassDataRemapper.Maps(
+                fieldMap = fieldIndexMap,
+                methodMap = methodIndexMap,
+                codeOffMap = absCodeOffMap,
+            )
+            val newClassDataOffsets = HashMap<Int, Int>()   // 旧偏移 → 段内偏移
+            sec.classDefs.forEach { cd ->
+                val old = cd.classDataOff
+                if (old == 0L) return@forEach
+                val oldOff = old.toInt()
+                if (newClassDataOffsets.containsKey(oldOff)) return@forEach
+                val rewritten = ClassDataRemapper.remap(dexBytes, oldOff, remapMaps)
+                // ⚠️ class_data_item 也是 **1 字节对齐**，不能 align(4)：
+                // 填充字节会被 ART 当成下一个 class_data 的内容。
+                newClassDataOffsets[oldOff] = classDataBuf.position
+                classDataBuf.bytes(rewritten)
+            }
+
+            // ── 11b. class_defs ──
+            val classDefsBuf = GrowableBuffer(classOrder.size * DexFormat.CLASS_DEF_WIDTH)
             classOrder.forEach { e ->
                 val c = e.value
-                out.u32(c.classIdx.toLong())
-                out.u32(c.accessFlags.toLong())
+                classDefsBuf.u32(c.classIdx.toLong())
+                classDefsBuf.u32(c.accessFlags.toLong())
                 // -1 表示 NO_INDEX，写回 0xFFFFFFFF
-                out.u32(if (c.superIdx < 0) DexFormat.NO_INDEX else c.superIdx.toLong())
-                // interfaces_off 也指向 type_list，同样要用新偏移
+                classDefsBuf.u32(if (c.superIdx < 0) DexFormat.NO_INDEX else c.superIdx.toLong())
+                // interfaces_off 也指向 type_list（段内偏移，排版后回填）
+                // ⚠️ 段内偏移可能是 0（段的第一项），与「没有」冲突，
+                // 所以统一用 `值 + 1`，0 仍表示没有。回填时减 1。
                 val newIfaces = if (c.interfacesOff > 0) {
-                    (newTypeListOffsets[c.interfacesOff.toInt()] ?: c.interfacesOff.toInt()).toLong()
+                    (newTypeListOffsets[c.interfacesOff.toInt()]?.let { it + 1 })?.toLong() ?: 0L
                 } else 0L
-                out.u32(newIfaces)
-                out.u32(if (c.sourceFileIdx < 0) DexFormat.NO_INDEX else c.sourceFileIdx.toLong())
+                classDefsBuf.u32(newIfaces)
+                classDefsBuf.u32(if (c.sourceFileIdx < 0) DexFormat.NO_INDEX else c.sourceFileIdx.toLong())
                 // annotations_off 指向重写后的 directory
                 val newAnn = if (c.annotationsOff > 0) {
-                    (newAnnotationsOffsets[c.annotationsOff.toInt()] ?: c.annotationsOff.toInt()).toLong()
+                    (newAnnotationsOffsets[c.annotationsOff.toInt()]?.let { it + 1 })?.toLong() ?: 0L
                 } else 0L
-                out.u32(newAnn)
-                // class_data_off 指向重写后的新位置
-                val newCdo = newClassDataOffsets[c.classDataOff.toInt()]
-                    ?: run {
-                        if (c.classDataOff != 0L) {
-                            System.err.println("MISS classData ${c.classDataOff} keys=${newClassDataOffsets.size}")
-                        }
-                        c.classDataOff.toInt()
-                    }
-                out.u32(newCdo.toLong())
-                // static_values_off 指向重写后的 encoded_array
+                classDefsBuf.u32(newAnn)
+                // ⚠️ 这里把「段内偏移」写成 `值 + 1`，用 0 表示「没有」。
+                // 因为 class_data 段的第一项段内偏移就是 0，与「无 class_data」冲突。
+                // 回填时统一减 1 并加段基址。
+                val newCdo = newClassDataOffsets[c.classDataOff.toInt()]?.let { it + 1 } ?: 0
+                classDefsBuf.u32(newCdo.toLong())
+                // static_values_off
                 val newSv = if (c.staticValuesOff > 0) {
-                    (newStaticValuesOffsets[c.staticValuesOff.toInt()]
-                        ?: c.staticValuesOff.toInt()).toLong()
+                    (newStaticValuesOffsets[c.staticValuesOff.toInt()]?.let { it + 1 })?.toLong() ?: 0L
                 } else 0L
-                out.u32(newSv)
+                classDefsBuf.u32(newSv)
             }
 
-            // ── 11. 重建 map_list ──
-            // map_list 必须按 type 升序排列，且每项记录「该类有几项、从哪开始」。
-            // 池注入把 6 个索引段搬到了文件末尾、条目数也变了，
-            // 所以整张表都要重写——不是只改几个 size 字段。
-            val mapEntries = sortedMapOf<Int, Pair<Int, Int>>()   // type -> (size, offset)
+            // ── 12. 按规范段序排版 ──
+            //
+            // 段序照抄 dexlib2 的 DexWriter.writeTo()：它写出的文件必然通过 ART 校验。
+            // 六张 id 表在前，之后是 data 区（data_off 指向第一个 data 段），最后 map_list。
+            val sections = listOf(
+                DexSectionLayout.Section(DexFormat.TYPE_STRING_ID_ITEM, mergedStrings.size) { stringIdsBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_TYPE_ID_ITEM, mergedTypeStringIdx.size) { typeIdsBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_PROTO_ID_ITEM, mergedProtos.size) { protoIdsBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_FIELD_ID_ITEM, fieldOrder.size) { fieldIdsBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_METHOD_ID_ITEM, methodOrder.size) { methodIdsBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_CLASS_DEF_ITEM, classOrder.size) { classDefsBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_STRING_DATA_ITEM, mergedStrings.size) { stringDataBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_TYPE_LIST, typeListCount) { typeListBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_ENCODED_ARRAY_ITEM, staticValueArrays.size) { encodedArrayBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_ITEM, annotationItemCount) { annotationItemBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_SET_ITEM, annotationSetCount) { annotationSetBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_SET_REF_LIST, annotationSetRefCount) { annotationSetRefBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATIONS_DIRECTORY_ITEM, newAnnotationsOffsets.size) { annotationDirBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_DEBUG_INFO_ITEM, debugInfoCache.size) { debugInfoBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_CODE_ITEM, codeItemsToBuild.size) { codeItemBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_CLASS_DATA_ITEM, newClassDataOffsets.size) { classDataBuf.toByteArray() },
+            )
 
-            fun putMap(type: Int, size: Int, offset: Int) {
-                if (size > 0) mapEntries[type] = size to offset
+            val laid = DexSectionLayout.layout(DexFormat.HEADER_SIZE, dexBytes, sections)
+            val out = laid.buffer
+
+            // ── 12a. 把「段内偏移」回填成绝对偏移 ──
+            // 每个段里引用了别的段的位置，排版前只知道段内偏移，现在加上段基址。
+            fun base(type: Int) = laid.base(type)
+
+            // string_ids：每项指向 string_data 段内偏移
+            var p = base(DexFormat.TYPE_STRING_ID_ITEM)
+            repeat(mergedStrings.size) {
+                val rel = out.peekU32(p)
+                out.patchU32(p, (base(DexFormat.TYPE_STRING_DATA_ITEM) + rel).toLong())
+                p += 4
             }
-
-            putMap(DexFormat.TYPE_HEADER_ITEM, 1, 0)
-            putMap(DexFormat.TYPE_STRING_ID_ITEM, mergedStrings.size, stringIdsOff)
-            putMap(DexFormat.TYPE_TYPE_ID_ITEM, mergedTypeStringIdx.size, typeIdsOff)
-            putMap(DexFormat.TYPE_PROTO_ID_ITEM, mergedProtos.size, protoIdsOff)
-            putMap(DexFormat.TYPE_FIELD_ID_ITEM, remappedFields.size, fieldIdsOff)
-            putMap(DexFormat.TYPE_METHOD_ID_ITEM, allMethodEntries.size, methodIdsOff)
-            putMap(DexFormat.TYPE_CLASS_DEF_ITEM, mergedClasses.size, classDefsOff)
-
-            // 原 map 里的其它段（data 区里那些没动的：code / class_data / string_data…）
-            // 偏移不变，但条目数要按本次新增量调整。这里从原 map 复制，再覆盖已知项。
-            val oldMapOff = src.u32AsInt(DexFormat.H_MAP_OFF, "map_off")
-            if (oldMapOff != 0) {
-                val oldCount = src.u32AsInt(oldMapOff, "map size")
-                for (i in 0 until oldCount) {
-                    val itemOff = oldMapOff + 4 + i * DexFormat.MAP_ITEM_WIDTH
-                    if (itemOff + DexFormat.MAP_ITEM_WIDTH > dexBytes.size) break
-                    val type = src.u16(itemOff)
-                    if (mapEntries.containsKey(type)) continue
-                    val size = src.u32AsInt(itemOff + 4, "size")
-                    val offset = src.u32AsInt(itemOff + 8, "offset")
-                    // 这些段的 size/offset 因本次改动而变化的，逐个修正
-                    when (type) {
-                        // 新增了字符串数据项
-                        DexFormat.TYPE_STRING_DATA_ITEM -> putMap(type, size + newStringsToAdd.size, offset)
-                        // 新增了 type_list（新 proto 的参数表）
-                        DexFormat.TYPE_TYPE_LIST ->
-                            putMap(type, size + if (newProtoParamsOff != 0L) 1 else 0, offset)
-                        // class_data / code_item：本次只**重建**已有的，没有新增条目，
-                        // 所以 size 不变。⚠️ 之前在这里写了 size + 1，导致 map 声称有 77 个
-                        // class_data_item 而实际只有 76 个 —— ART 校验器直接判非法。
-                        DexFormat.TYPE_CLASS_DATA_ITEM -> {
-                            val firstNew = newClassDataOffsets.values.minOrNull() ?: offset
-                            putMap(type, size, firstNew)
-                        }
-                        else -> putMap(type, size, offset)
-                    }
+            // type_ids / field_ids / method_ids 只含池下标，无需回填
+            // proto_ids.parameters_off → type_list（写入时是段内偏移 +1）
+            p = base(DexFormat.TYPE_PROTO_ID_ITEM)
+            repeat(mergedProtos.size) {
+                val rel = out.peekU32(p + 8)
+                if (rel != 0) out.patchU32(p + 8, (base(DexFormat.TYPE_TYPE_LIST) + rel - 1).toLong())
+                p += 12
+            }
+            // class_defs: interfaces_off / annotations_off / class_data_off / static_values_off
+            // ⚠️ 这些字段写入的是「段内偏移 + 1」，0 表示没有。回填时减 1 再加段基址。
+            p = base(DexFormat.TYPE_CLASS_DEF_ITEM)
+            repeat(classOrder.size) {
+                val ifaces = out.peekU32(p + DexFormat.CD_INTERFACES_OFF)
+                if (ifaces != 0) out.patchU32(
+                    p + DexFormat.CD_INTERFACES_OFF,
+                    (base(DexFormat.TYPE_TYPE_LIST) + ifaces - 1).toLong(),
+                )
+                val ann = out.peekU32(p + DexFormat.CD_ANNOTATIONS_OFF)
+                if (ann != 0) out.patchU32(
+                    p + DexFormat.CD_ANNOTATIONS_OFF,
+                    (base(DexFormat.TYPE_ANNOTATIONS_DIRECTORY_ITEM) + ann - 1).toLong(),
+                )
+                val cdo = out.peekU32(p + DexFormat.CD_CLASS_DATA_OFF)
+                if (cdo != 0) out.patchU32(
+                    p + DexFormat.CD_CLASS_DATA_OFF,
+                    (base(DexFormat.TYPE_CLASS_DATA_ITEM) + cdo - 1).toLong(),
+                )
+                val sv = out.peekU32(p + DexFormat.CD_STATIC_VALUES_OFF)
+                if (sv != 0) out.patchU32(
+                    p + DexFormat.CD_STATIC_VALUES_OFF,
+                    (base(DexFormat.TYPE_ENCODED_ARRAY_ITEM) + sv - 1).toLong(),
+                )
+                p += DexFormat.CLASS_DEF_WIDTH
+            }
+            // code_item.debug_info_off → debug_info 段
+            p = base(DexFormat.TYPE_CODE_ITEM)
+            var co = p
+            // ⚠️ 这里不能靠「累加 code_item 长度」推算每个 code_item 的位置：
+            // code_item 长度依赖 tries/handlers 的重编码结果，一处算错后面全错，
+            // 而且错误表现为 `Bad index for debug_info_item parameter_name`
+            // （debug_info_off 指到了别处），完全不像「偏移算错」。
+            // 改为在生成时把新偏移记进 movedCodeItems，直接按映射表回填。
+            val codeItemBaseForDbg = base(DexFormat.TYPE_CODE_ITEM)
+            val debugInfoBase = base(DexFormat.TYPE_DEBUG_INFO_ITEM)
+            movedCodeItems.forEach { (_, relCo) ->
+                val newCo = codeItemBaseForDbg + relCo
+                val dbgSentinel = out.peekU32(newCo + DexFormat.CI_DEBUG_INFO_OFF)
+                if (dbgSentinel != 0) {
+                    out.patchU32(
+                        newCo + DexFormat.CI_DEBUG_INFO_OFF,
+                        // 写入时是「段内偏移 + 1」，这里减 1 再加段基址
+                        (debugInfoBase + dbgSentinel - 1).toLong(),
+                    )
                 }
             }
 
-            // map_list 自身也要在表里，偏移就是它即将写入的位置
-            out.align(4)
-            val mapListOff = out.position
-            putMap(DexFormat.TYPE_MAP_LIST, 1, mapListOff)
-
-            // 写出 map_list（按 type 升序）
-            val sortedEntries = mapEntries.toSortedMap()
-            out.u32(sortedEntries.size.toLong())
-            sortedEntries.forEach { (type, v) ->
-                out.u16(type)
-                out.u16(0)
-                out.u32(v.first.toLong())
-                out.u32(v.second.toLong())
+            // 注解内部引用：annotation_set / ref_list / directory 都指向别的段的段内偏移
+            // （这些在 remapDirectory 时就按段内偏移记录，现在统一加基址）
+            // ⚠️ 这里必须严格按**各自段的实际长度**扫描：
+            // 越界一步就会写到紧邻的其它段（实测把 type_list 覆盖成随机值，
+            // 表现为 `Bad index for type_list.type`，而段级自检全部通过）。
+            // item → annotation_item 段自身；set 里的条目指向 annotation_item
+            run {
+                val setBase = base(DexFormat.TYPE_ANNOTATION_SET_ITEM)
+                val setLen = annotationSetBuf.size
+                var sp = 0
+                while (sp + 4 <= setLen) {
+                    val n = out.peekU32(setBase + sp)
+                    sp += 4
+                    if (n < 0 || sp + n * 4 > setLen) {
+                        return Result.Failed(
+                            "annotation_set 扫描越界：第 $sp 字节处 size=$n 超出段长 $setLen"
+                        )
+                    }
+                    repeat(n) {
+                        val rel = out.peekU32(setBase + sp)
+                        // 写入时是「段内偏移 + 1」，0 表示没有（见 AnnotationRemapper）
+                        out.patchU32(
+                            setBase + sp,
+                            (base(DexFormat.TYPE_ANNOTATION_ITEM) + rel - 1).toLong(),
+                        )
+                        sp += 4
+                    }
+                }
+            }
+            // ref_list 里的条目指向 annotation_set
+            run {
+                val refBase = base(DexFormat.TYPE_ANNOTATION_SET_REF_LIST)
+                val refLen = annotationSetRefBuf.size
+                var rp = 0
+                while (rp + 4 <= refLen) {
+                    val n = out.peekU32(refBase + rp)
+                    rp += 4
+                    if (n < 0 || rp + n * 4 > refLen) {
+                        return Result.Failed(
+                            "annotation_set_ref_list 扫描越界：size=$n 超出段长 $refLen"
+                        )
+                    }
+                    repeat(n) {
+                        val rel = out.peekU32(refBase + rp)
+                        if (rel != 0) {
+                            out.patchU32(
+                                refBase + rp,
+                                (base(DexFormat.TYPE_ANNOTATION_SET_ITEM) + rel - 1).toLong(),
+                            )
+                        }
+                        rp += 4
+                    }
+                }
+            }
+            // directory 里的 class_annotations_off / field/method/param 的 set 偏移
+            run {
+                val dirBase = base(DexFormat.TYPE_ANNOTATIONS_DIRECTORY_ITEM)
+                val dirLen = annotationDirBuf.size
+                var dp = 0
+                while (dp + 16 <= dirLen) {
+                    val classAnn = out.peekU32(dirBase + dp)
+                    if (classAnn != 0) out.patchU32(
+                        dirBase + dp,
+                        (base(DexFormat.TYPE_ANNOTATION_SET_ITEM) + classAnn - 1).toLong(),
+                    )
+                    val fs = out.peekU32(dirBase + dp + 4)
+                    val ms = out.peekU32(dirBase + dp + 8)
+                    val ps = out.peekU32(dirBase + dp + 12)
+                    var q = dp + 16
+                    val entries = fs + ms + ps
+                    if (entries < 0 || q + entries * 8 > dirLen) {
+                        return Result.Failed(
+                            "annotations_directory 扫描越界：fs=$fs ms=$ms ps=$ps 超出段长 $dirLen"
+                        )
+                    }
+                    repeat(fs) {
+                        val setOff = out.peekU32(dirBase + q + 4)
+                        if (setOff != 0) out.patchU32(
+                            dirBase + q + 4,
+                            (base(DexFormat.TYPE_ANNOTATION_SET_ITEM) + setOff - 1).toLong(),
+                        )
+                        q += 8
+                    }
+                    repeat(ms) {
+                        val setOff = out.peekU32(dirBase + q + 4)
+                        if (setOff != 0) out.patchU32(
+                            dirBase + q + 4,
+                            (base(DexFormat.TYPE_ANNOTATION_SET_ITEM) + setOff - 1).toLong(),
+                        )
+                        q += 8
+                    }
+                    repeat(ps) {
+                        val refOff = out.peekU32(dirBase + q + 4)
+                        if (refOff != 0) out.patchU32(
+                            dirBase + q + 4,
+                            (base(DexFormat.TYPE_ANNOTATION_SET_REF_LIST) + refOff - 1).toLong(),
+                        )
+                        q += 8
+                    }
+                    dp = q
+                }
             }
 
-            val finalSize = out.position
-
-            // ── 11b. 回填指令里的池索引 ──
-            // 指令区没有搬运（原样留在原文件区域），所以直接在 out 的原位置改数字。
+            // ── 12b. 回填指令里的池索引 ──
+            // 指令里的索引现在是**池下标**，不需要加段基址，但要按映射表换算。
+            // code_item 被整体重建过，所以 patch 位置要按「新 code_off + 区内偏移」重算。
             val insnMaps = EncodedValueRemapper.Maps(
                 stringMap = stringIndexMap,
                 typeMap = typeIndexMap,
@@ -697,27 +1242,95 @@ internal object PoolInjector {
                 methodMap = methodIndexMap,
                 protoMap = protoIndexMap,
             )
-            InstructionRefRemapper.patch(out, insnPatches, insnMaps)
-                ?.let { return Result.Failed(it) }
+            // ⚠️ 只处理能定位到新 code_item 的 patch。
+            // 找不到映射的 patch 其 `absOffset` 是**原文件**的绝对偏移，
+            // 若照它去写新文件，就会把别的段（实测是 type_list）覆盖成随机值——
+            // 表现为 `Bad index for type_list.type: 56c >= 14e`，
+            // 而所有段级自检都是通过的，极难定位。
+            val codeBase = base(DexFormat.TYPE_CODE_ITEM)
+            val codeItemRange = codeBase until (codeBase + codeItemBuf.size)
+            // 目标方法前面插了几个 16 位字（用于修正它体内原指令的位置）
+            val insnPrefixWords = if (patchCodeOff >= 0) (insnPatch?.newInsns?.size ?: 0) else 0
+            runCatching {
+                val hit = insnPatches.count { it.ownerCodeOff == patchCodeOff }
+                java.io.File("/data/data/com.termux/files/home/diag-patch2.txt")
+                    .writeText("patchCodeOff=$patchCodeOff prefixWords=$insnPrefixWords " +
+                        "总patch=${insnPatches.size} 命中=$hit\n" +
+                        "前5个 ownerCodeOff=${insnPatches.take(5).map { it.ownerCodeOff }}\n")
+            }
+            val shiftedPatches = ArrayList<InstructionRefRemapper.Patch>(insnPatches.size)
 
-            out.patchU32(DexFormat.H_MAP_OFF, mapListOff.toLong())
+            insnPatches.forEach { patch ->
+                // ⚠️ `collect` 已经把 absOffset 算成「新 code_item 的**段内**位置」：
+                // 它用 `shift = newCodeOff - oldCodeOff` 修正过，而那个 newCodeOff
+                // 来自 movedCodeItems，本来就是段内偏移。
+                // 所以这里只加段基址，**不能再做一次位移** ——
+                // 第一版在这里又加了 `newBase + inItem`，等于双重位移，
+                // 结果指令索引被写到 type_list 段里（偏移 98374 落在 96376..99326），
+                // ART 报 `Bad index for type_list.type`，段级自检全绿却查不出来。
+                // ⚠️ 目标方法前面插了新指令，它体内所有原指令都后移了 prefixWords 个字。
+                // 不补这个偏移，patch 会落到**前一条指令上**，把它的寄存器字段写坏
+                // —— 实测把 `invoke-super {v4,v5}` 改成了 `{v0,v10}`，
+                // 运行时报 `invalid reg index (10) in non-range invoke`。
+                // ⚠️ 目标方法前面插了新指令，它体内的原指令全部后移。
+                // `absOffset` 是按**原**区内偏移算的，所以要补上插入的**字节数**。
+                //
+                // 这里踩过两个坑：
+                //   1. 不加 → patch 落到前一条指令上，把它的寄存器字段写坏
+                //   2. 加了但按「字」而不是「字节」→ 只后移 3 字节，
+                //      正好错开半个字，写到指令中间，把 op 改成了别的值
+                //      （实测 `invoke-super` 的 0x6f 变成 0x00，变成 nop）
+                // dex 里的偏移单位是**字节**，所以必须 ×2。
+                val insertBytes =
+                    if (patch.ownerCodeOff == patchCodeOff) insnPrefixWords * 2 else 0
+                val shifted = codeBase + patch.absOffset + insertBytes
+                if (shifted !in codeItemRange) {
+                    return Result.Failed(
+                        "指令 patch 段内偏移 ${patch.absOffset} 加上 code_item 基址 $codeBase " +
+                            "后得到 $shifted，落在段 $codeItemRange 之外"
+                    )
+                }
+                shiftedPatches += patch.copy(absOffset = shifted)
+            }
+            runCatching {
+                val tgt = shiftedPatches.filter { it.ownerCodeOff == patchCodeOff }
+                    .map { "${it.kind}@${it.absOffset - codeBase}" }
+                java.io.File("/data/data/com.termux/files/home/diag-hit.txt")
+                    .writeText("codeBase=$codeBase 目标方法段内地址=${tgt}\n" +
+                        "原方法指令应为 0x206f 0x0004 0x0054 0x4007...\n")
+            }
+            InstructionRefRemapper.patch(
+                out,
+                shiftedPatches,
+                insnMaps,
+                codeItemRange,
+            )?.let { return Result.Failed(it) }
 
-            // ── 12. 改 header ──
+            // ── 13. 写 map_list 与 header ──
+            // map 必须在所有交叉引用回填之后写：它记录的是各段起点，
+            // 而段内回填不改起点，所以放在最后即可。
+            val mapEnd = DexSectionLayout.appendMap(laid)
+            out.patchU32(DexFormat.H_MAP_OFF, laid.mapOffset.toLong())
+            // file_size 用 map 的真实结束位置，而不是缓冲区长度：
+            // 预留区里没被 map 项填满的零字节要裁掉，否则 map_list 不是最后一项
+            val finalSize = mapEnd
             out.patchU32(DexFormat.H_FILE_SIZE, finalSize.toLong())
             out.patchU32(DexFormat.H_STRING_IDS_SIZE, mergedStrings.size.toLong())
-            out.patchU32(DexFormat.H_STRING_IDS_OFF, stringIdsOff.toLong())
+            out.patchU32(DexFormat.H_STRING_IDS_OFF, base(DexFormat.TYPE_STRING_ID_ITEM).toLong())
             out.patchU32(DexFormat.H_TYPE_IDS_SIZE, mergedTypeStringIdx.size.toLong())
-            out.patchU32(DexFormat.H_TYPE_IDS_OFF, typeIdsOff.toLong())
+            out.patchU32(DexFormat.H_TYPE_IDS_OFF, base(DexFormat.TYPE_TYPE_ID_ITEM).toLong())
             out.patchU32(DexFormat.H_PROTO_IDS_SIZE, mergedProtos.size.toLong())
-            out.patchU32(DexFormat.H_PROTO_IDS_OFF, protoIdsOff.toLong())
-            out.patchU32(DexFormat.H_FIELD_IDS_SIZE, remappedFields.size.toLong())
-            out.patchU32(DexFormat.H_FIELD_IDS_OFF, fieldIdsOff.toLong())
-            out.patchU32(DexFormat.H_METHOD_IDS_SIZE, allMethodEntries.size.toLong())
-            out.patchU32(DexFormat.H_METHOD_IDS_OFF, methodIdsOff.toLong())
-            out.patchU32(DexFormat.H_CLASS_DEFS_SIZE, mergedClasses.size.toLong())
-            out.patchU32(DexFormat.H_CLASS_DEFS_OFF, classDefsOff.toLong())
+            out.patchU32(DexFormat.H_PROTO_IDS_OFF, base(DexFormat.TYPE_PROTO_ID_ITEM).toLong())
+            out.patchU32(DexFormat.H_FIELD_IDS_SIZE, fieldOrder.size.toLong())
+            out.patchU32(DexFormat.H_FIELD_IDS_OFF, base(DexFormat.TYPE_FIELD_ID_ITEM).toLong())
+            out.patchU32(DexFormat.H_METHOD_IDS_SIZE, methodOrder.size.toLong())
+            out.patchU32(DexFormat.H_METHOD_IDS_OFF, base(DexFormat.TYPE_METHOD_ID_ITEM).toLong())
+            out.patchU32(DexFormat.H_CLASS_DEFS_SIZE, classOrder.size.toLong())
+            out.patchU32(DexFormat.H_CLASS_DEFS_OFF, base(DexFormat.TYPE_CLASS_DEF_ITEM).toLong())
+            out.patchU32(DexFormat.H_DATA_OFF, laid.dataOffset.toLong())
+            out.patchU32(DexFormat.H_DATA_SIZE, laid.dataSize.toLong())
 
-            val result = out.toByteArray()
+            val result = out.toByteArray().copyOf(finalSize)
             fixChecksums(result)
 
             Result.Ok(
@@ -742,7 +1355,16 @@ internal object PoolInjector {
         /** type_list 在数据段的偏移，0 表示无参数 */
         val parametersOff: Long = 0,
     ) : Comparable<ProtoEntry> {
-        fun remap(typeMap: IntArray) = copy(
+        /**
+         * 把池下标重映射到新池。
+         *
+         * ⚠️ `shortyString` 也必须映射——它是 **string_idx**，
+         * 字符串池重排后原下标会指向别的字符串。
+         * 漏掉它的表现是 ART 报 `Bad shorty character: 'T'`
+         * （shorty 只允许 `VZBSCIJFD` 和 `L` 这几类字符）。
+         */
+        fun remap(typeMap: IntArray, stringMap: IntArray) = copy(
+            shortyString = stringMap[shortyString],
             returnTypeIdx = typeMap[returnTypeIdx],
             paramTypeIdx = paramTypeIdx.map { typeMap[it] },
         )
