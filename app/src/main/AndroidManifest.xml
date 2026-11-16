@@ -12,7 +12,15 @@
     <queries>
         <package android:name="bin.mt.plus" />
     </queries>
+    <!--
+      largeHeap：注入 30MB 级别的 dex 时，要在内存里同时持有
+      「原 dex + 中间产物 + 最终产物」约 3 份数据。
+      默认堆上限 256MB 实测会 OOM：
+      `Failed to allocate a 29989720 byte allocation` 直接崩在注入过程中。
+      系统给到 512MB 后足够。
+    -->
     <application
+        android:largeHeap="true"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"

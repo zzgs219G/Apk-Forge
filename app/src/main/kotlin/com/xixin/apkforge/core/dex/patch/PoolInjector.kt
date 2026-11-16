@@ -82,7 +82,20 @@ internal object PoolInjector {
         val classType: String,
         val methodName: String,
         val methodSig: String,
+        /**
+         * 要插到目标方法最前面的指令（16 位字）。
+         *
+         * 其中 **`[methodIdxWord]` 那个字留空**，由 PoolInjector 在算出
+         * `newMethodIdx` 后填入 —— 这样「登记方法」和「插入调用」一次就能做完。
+         *
+         * 【为什么必须这样】如果拆成两次调用（先登记拿 method_idx、再插入），
+         * 每次都会产出一份**完整的新 dex**。对 30MB 的 dex，
+         * 两遍产物 + 原文件同时在内存里会直接 OOM
+         * （实测 `Failed to allocate a 29989720 byte allocation`）。
+         */
         val newInsns: ShortArray,
+        /** `newInsns` 里哪个下标是 method_idx；-1 表示不含索引 */
+        val methodIdxWord: Int = 1,
     )
 
     fun addMethodRef(
@@ -93,6 +106,17 @@ internal object PoolInjector {
         val src = DexBuffer(dexBytes)
         runCatching { validate(src) }.getOrElse {
             return Result.Failed(it.message ?: "dex 头部校验失败")
+        }
+
+        // 分段计时：注入慢必须能定位到具体步骤，否则只能靠猜。
+        // core/ 层不允许用 android.util.Log，用 stderr（Android 会把它转进 logcat）。
+        // 分段耗时。**不能用 System.err / println**：Android App 里它们默认被
+        // 重定向到 /dev/null，不进 logcat，加了也看不到。
+        // 所以攒起来拼进返回值的 note，由 UI 显示给用户。
+        val t0 = System.nanoTime()
+        val laps = ArrayList<Pair<String, Long>>(16)
+        fun lap(name: String) {
+            laps += name to (System.nanoTime() - t0) / 1_000_000
         }
 
         return try {
@@ -106,9 +130,11 @@ internal object PoolInjector {
                 "(" + ref.paramTypes.joinToString("") + ")" + ref.returnType,
             )
 
+            lap("1-read-sections")
             // ── 1. 读出现有各段 ──
             val sec = Sections.read(src)
 
+            lap("2-read-strings")
             // ── 2. 现有字符串（解码后，用于排序与查重） ──
             val oldStrings = sec.stringOffsets.map { off ->
                 Mutf8Codec.readOne(dexBytes, off).first
@@ -160,6 +186,7 @@ internal object PoolInjector {
             fun strIdx(s: String): Int = lookup[s]
                 ?: error("字符串 $s 不在合并后的池里")
 
+            lap("5-types")
             // ── 5. 类型：需要新增 owner 与可能的参数/返回类型 ──
             val oldTypeStrings = sec.typeDescriptorIndices.map { it }   // 旧 type[i] → 旧 string_idx
             val typeWanted = (listOf(ref.owner) + ref.paramTypes + ref.returnType).distinct()
@@ -241,6 +268,7 @@ internal object PoolInjector {
             }
             if (newProtoIdx < 0) return Result.Failed("无法定位新 proto 的下标")
 
+            lap("7-fields")
             // ── 7. 字段：只需重映射（不新增） ──
             // 注意：class_idx 经 typeIndexMap 重映射后**可能不再有序**
             // （新类型插入到中间会改变后续 type 下标），所以必须重排并记录映射。
@@ -284,6 +312,7 @@ internal object PoolInjector {
                 newMethodIdx = methodIndexMap[existingMethodIdx!!]
             }
 
+            lap("9-classdefs")
             // ── 9. 类定义：重映射所有索引 ──
             // class_data_item 会在下面统一重写（见 10b），所以这里只需改索引。
             val mergedClasses = sec.classDefs.map { cd ->
@@ -312,13 +341,18 @@ internal object PoolInjector {
                     val e = byIdx.getValue(idx)
                     val c = e.value
                     if (c.superIdx >= 0) place(c.superIdx, visiting)
-                    // 接口列表在 interfacesOff 指向的 type_list 里，原样读出
+                    // 接口列表在 interfacesOff 指向的 type_list 里。
+                    // ⚠️ 里面存的是**旧** type_idx，而 byIdx 的键是**新** class_idx ——
+                    // 必须先经 typeIndexMap 换算，否则永远匹配不上，
+                    // 拓扑排序等于没做（实测 465 处依赖序违规一个没修掉）。
                     if (c.interfacesOff > 0) {
                         runCatching {
                             val n = src.u32AsInt(c.interfacesOff.toInt(), "ifaces_n")
                             repeat(n) {
-                                val t = src.u16(c.interfacesOff.toInt() + 4 + it * 2)
-                                place(t, visiting)
+                                val oldType = src.u16(c.interfacesOff.toInt() + 4 + it * 2)
+                                if (oldType < typeIndexMap.size) {
+                                    place(typeIndexMap[oldType], visiting)
+                                }
                             }
                         }
                     }
@@ -450,6 +484,7 @@ internal object PoolInjector {
                 }
             }
 
+            lap("10b-3a-locate")
             // ── 10b-3a. 定位「要替换指令」的那个 code_item ──
             // 注入要做两件事：把调用方法登记进池（上面已完成），
             // 以及把 invoke 指令插进目标方法的**第一条指令之前**。
@@ -474,6 +509,7 @@ internal object PoolInjector {
                 header.codeOff
             } else -1
 
+            lap("10b-3b-prepare")
             // ── 10b-3b. 重建**所有** code_item ──
             //
             // ⚠️ 这里从「只重建带 try 的」改成「全部重建」。原因：
@@ -556,7 +592,15 @@ internal object PoolInjector {
                 // `Non-zero padding ... before section of type 8193`。
                 val totalInsns = (prefix?.size ?: 0) + insnsSize
                 codeItemBuf.u32(totalInsns.toLong())
-                prefix?.forEach { codeItemBuf.u16(it.toInt() and 0xFFFF) }
+                if (prefix != null) {
+                    // 指令模板里 method_idx 那一位是空的，这里填入真实下标。
+                    // 这样「登记方法」与「插入调用」在同一次池重排里完成，
+                    // 不需要为拿 method_idx 先单独产出一份 dex（那会导致 OOM）。
+                    prefix.forEachIndexed { i, w ->
+                        val v = if (i == insnPatch!!.methodIdxWord) newMethodIdx else w.toInt()
+                        codeItemBuf.u16(v and 0xFFFF)
+                    }
+                }
                 codeItemBuf.bytes(
                     dexBytes.copyOfRange(co + DexFormat.CI_INSNS, co + DexFormat.CI_INSNS + insnsSize * 2)
                 )
@@ -580,6 +624,7 @@ internal object PoolInjector {
             // 排版后无法原地补丁。而 code_item 段基址依赖后面几个段的大小，
             // 所以等各段都产出完再统一生成。
 
+            lap("10b-codeitem-done")
             // ── 10b-2. 重写注解 ──
             // 注解里是 type_idx + 元素名的 string_idx + 元素值，池重排后全部错位。
             // 表现：@kotlin.Metadata 变成 @java.util.Iterator，Kotlin 反射与 Compose 全废。
@@ -593,37 +638,41 @@ internal object PoolInjector {
             var annotationSetCount = 0
             var annotationSetRefCount = 0
             val annSink = object : AnnotationRemapper.Sink {
-                override fun item(bytes: ByteArray): Int {
+                override fun item(buf: ByteSink, len: Int): Int {
                     annotationItemBuf.align(1)
                     val p = annotationItemBuf.position
-                    annotationItemBuf.bytes(bytes)
+                    // 直接按长度写入，不走 toByteArray() —— 那是 3.5 万次多余的复制。
+                    // ByteSink 的内部数组长度可能大于 len，所以必须显式传长度。
+                    annotationItemBuf.bytes(buf.raw(), 0, len)
                     annotationItemCount++
                     // annotation_item 按 1 对齐（ART 规定），无需补
                     return p
                 }
 
-                override fun set(bytes: ByteArray): Int {
+                override fun set(buf: GrowableBuffer, len: Int): Int {
                     annotationSetBuf.align(4)
                     val p = annotationSetBuf.position
-                    annotationSetBuf.bytes(bytes)
+                    annotationSetBuf.bytes(buf.raw(), 0, len)
                     annotationSetBuf.align(4)      // 每项起点必须 4 对齐
                     annotationSetCount++
                     return p
                 }
 
-                override fun refList(bytes: ByteArray): Int {
+                override fun refList(buf: GrowableBuffer, len: Int): Int {
                     annotationSetRefBuf.align(4)
                     val p = annotationSetRefBuf.position
-                    annotationSetRefBuf.bytes(bytes)
+                    annotationSetRefBuf.bytes(buf.raw(), 0, len)
                     annotationSetRefBuf.align(4)
                     annotationSetRefCount++
                     return p
                 }
             }
+            var annDirCount = 0
             sec.classDefs.forEach { cd ->
                 if (cd.annotationsOff == 0L) return@forEach
                 val dirOff = cd.annotationsOff.toInt()
                 if (newAnnotationsOffsets.containsKey(dirOff)) return@forEach
+                annDirCount++
                 val bytes = AnnotationRemapper.remapDirectory(
                     dexBytes, dirOff, evMaps, annotationCache, annSink
                 )
@@ -701,6 +750,7 @@ internal object PoolInjector {
                 )
             }
 
+            lap("10b-annot-done $annDirCount")
             // ── 10c. 重写所有 type_list ──
             // proto_ids[i].parameters_off 与 class_def.interfaces_off 都指向 type_list，
             // 而 type_list 里存的是 type_idx（u16）—— type_ids 重排后它们全部失效。
@@ -857,6 +907,7 @@ internal object PoolInjector {
                 }
             }
 
+            lap("10c-typelist-done")
             // ── 11. 产出各 id 表（写入各自的缓冲，偏移在排版时确定）──
             // ⚠️ 这里必须用 HashMap 查偏移，不能 indexOf——
             // 8.5 万个字符串 × 线性查找 = 72 亿次比较，实测要 14 秒（比全量还慢）。
@@ -924,6 +975,7 @@ internal object PoolInjector {
                 methodIdsBuf.u32(e.value.nameString.toLong())
             }
 
+            lap("11-ids-done")
             // ── 11a. static_values：静态字段初值也是池下标 ──
             // `static final String X = "..."` 的初值存在 encoded_array 里，
             // 元素是 string_idx / type_idx。不改的话常量会变成别的内容
@@ -937,11 +989,11 @@ internal object PoolInjector {
                 }
             }
             staticValueArrays.forEach { oldOff ->
-                val tmp = mutableListOf<Byte>()
+                val tmp = ByteSink(64)
                 var q = oldOff
                 val (cnt2, n2) = Leb128.readUleb128(dexBytes, q)
                 q += n2
-                Leb128.writeUleb128(tmp, cnt2)
+                tmp.uleb128(cnt2)
                 repeat(cnt2.toInt()) {
                     q = EncodedValueRemapper.readAndWrite(dexBytes, q, tmp, evMaps)
                 }
@@ -954,6 +1006,7 @@ internal object PoolInjector {
                 encodedArrayBuf.bytes(tmp.toByteArray())
             }
 
+            lap("11a-static-values")
             // ── 11c. 生成 class_data（需要 code_item 段的绝对基址）──
             // class_data 里的 `code_off` 是 uleb128 变长字段，必须是**最终绝对偏移**，
             // 排版后无法原地补丁。此时 code_item 段之前的所有段都已产出完毕，
@@ -1003,6 +1056,7 @@ internal object PoolInjector {
                 classDataBuf.bytes(rewritten)
             }
 
+            lap("11c-classdata")
             // ── 11b. class_defs ──
             val classDefsBuf = GrowableBuffer(classOrder.size * DexFormat.CLASS_DEF_WIDTH)
             classOrder.forEach { e ->
@@ -1036,32 +1090,35 @@ internal object PoolInjector {
                 classDefsBuf.u32(newSv)
             }
 
+            lap("11b-classdefs-buf")
             // ── 12. 按规范段序排版 ──
             //
             // 段序照抄 dexlib2 的 DexWriter.writeTo()：它写出的文件必然通过 ART 校验。
             // 六张 id 表在前，之后是 data 区（data_off 指向第一个 data 段），最后 map_list。
             val sections = listOf(
-                DexSectionLayout.Section(DexFormat.TYPE_STRING_ID_ITEM, mergedStrings.size) { stringIdsBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_TYPE_ID_ITEM, mergedTypeStringIdx.size) { typeIdsBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_PROTO_ID_ITEM, mergedProtos.size) { protoIdsBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_FIELD_ID_ITEM, fieldOrder.size) { fieldIdsBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_METHOD_ID_ITEM, methodOrder.size) { methodIdsBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_CLASS_DEF_ITEM, classOrder.size) { classDefsBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_STRING_DATA_ITEM, mergedStrings.size) { stringDataBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_TYPE_LIST, typeListCount) { typeListBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_ENCODED_ARRAY_ITEM, staticValueArrays.size) { encodedArrayBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_ITEM, annotationItemCount) { annotationItemBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_SET_ITEM, annotationSetCount) { annotationSetBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_SET_REF_LIST, annotationSetRefCount) { annotationSetRefBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATIONS_DIRECTORY_ITEM, newAnnotationsOffsets.size) { annotationDirBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_DEBUG_INFO_ITEM, debugInfoCache.size) { debugInfoBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_CODE_ITEM, codeItemsToBuild.size) { codeItemBuf.toByteArray() },
-                DexSectionLayout.Section(DexFormat.TYPE_CLASS_DATA_ITEM, newClassDataOffsets.size) { classDataBuf.toByteArray() },
+                DexSectionLayout.Section(DexFormat.TYPE_STRING_ID_ITEM, mergedStrings.size, stringIdsBuf.size) { t -> t.bytes(stringIdsBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_TYPE_ID_ITEM, mergedTypeStringIdx.size, typeIdsBuf.size) { t -> t.bytes(typeIdsBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_PROTO_ID_ITEM, mergedProtos.size, protoIdsBuf.size) { t -> t.bytes(protoIdsBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_FIELD_ID_ITEM, fieldOrder.size, fieldIdsBuf.size) { t -> t.bytes(fieldIdsBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_METHOD_ID_ITEM, methodOrder.size, methodIdsBuf.size) { t -> t.bytes(methodIdsBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_CLASS_DEF_ITEM, classOrder.size, classDefsBuf.size) { t -> t.bytes(classDefsBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_STRING_DATA_ITEM, mergedStrings.size, stringDataBuf.size) { t -> t.bytes(stringDataBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_TYPE_LIST, typeListCount, typeListBuf.size) { t -> t.bytes(typeListBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_ENCODED_ARRAY_ITEM, staticValueArrays.size, encodedArrayBuf.size) { t -> t.bytes(encodedArrayBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_ITEM, annotationItemCount, annotationItemBuf.size) { t -> t.bytes(annotationItemBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_SET_ITEM, annotationSetCount, annotationSetBuf.size) { t -> t.bytes(annotationSetBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_SET_REF_LIST, annotationSetRefCount, annotationSetRefBuf.size) { t -> t.bytes(annotationSetRefBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATIONS_DIRECTORY_ITEM, newAnnotationsOffsets.size, annotationDirBuf.size) { t -> t.bytes(annotationDirBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_DEBUG_INFO_ITEM, debugInfoCache.size, debugInfoBuf.size) { t -> t.bytes(debugInfoBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_CODE_ITEM, codeItemsToBuild.size, codeItemBuf.size) { t -> t.bytes(codeItemBuf.toByteArray()) },
+                DexSectionLayout.Section(DexFormat.TYPE_CLASS_DATA_ITEM, newClassDataOffsets.size, classDataBuf.size) { t -> t.bytes(classDataBuf.toByteArray()) },
             )
 
             val laid = DexSectionLayout.layout(DexFormat.HEADER_SIZE, dexBytes, sections)
             val out = laid.buffer
 
+            lap("12-layout")
+            lap("12a-before-fillback")
             // ── 12a. 把「段内偏移」回填成绝对偏移 ──
             // 每个段里引用了别的段的位置，排版前只知道段内偏移，现在加上段基址。
             fun base(type: Int) = laid.base(type)
@@ -1232,6 +1289,7 @@ internal object PoolInjector {
                 }
             }
 
+            lap("12a-fillback-done")
             // ── 12b. 回填指令里的池索引 ──
             // 指令里的索引现在是**池下标**，不需要加段基址，但要按映射表换算。
             // code_item 被整体重建过，所以 patch 位置要按「新 code_off + 区内偏移」重算。
@@ -1306,6 +1364,7 @@ internal object PoolInjector {
                 codeItemRange,
             )?.let { return Result.Failed(it) }
 
+            lap("12b-insn-patch")
             // ── 13. 写 map_list 与 header ──
             // map 必须在所有交叉引用回填之后写：它记录的是各段起点，
             // 而段内回填不改起点，所以放在最后即可。
@@ -1338,8 +1397,13 @@ internal object PoolInjector {
                 methodIdx = newMethodIdx,
                 newStringCount = newStringsToAdd.size,
                 newTypeCount = newTypesFinal.size,
-                note = "池注入：+${newStringsToAdd.size} 字符串 +${newTypesFinal.size} 类型 " +
-                    "${dexBytes.size} → ${result.size} 字节",
+                note = buildString {
+                    append("+${newStringsToAdd.size} 字符串 +${newTypesFinal.size} 类型 ")
+                    append("${dexBytes.size} → ${result.size} 字节")
+                    // 分段耗时：用户看到「注入慢」时能知道慢在哪一段
+                    append(" ｜ ")
+                    append(laps.joinToString(" ") { "${it.first}=${it.second}ms" })
+                },
             )
         } catch (e: Exception) {
             Result.Failed("池注入失败：${e.message ?: e.javaClass.simpleName}")

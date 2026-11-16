@@ -83,61 +83,35 @@ object FastInjector {
             return Result.NotApplicable("${spec.methodName} 带 try/catch 块，增量路径暂不支持")
         }
 
+        // ── 第一步 + 第二步：编码指令，然后一次性完成「登记方法 + 插入调用」──
+        //
+        // ⚠️ 这里**不能**先单独跑一遍池注入去拿 method_idx：
+        // 每次调用 [-PoolInjector.addMethodRef] 都会产出一份完整的新 dex，
+        // 30MB 级别的 dex 上「第一遍产物 + 第二遍产物 + 原文件」同时驻留
+        // 会直接 OOM（实测 `Failed to allocate a 29989720 byte allocation`，
+        // 崩在注入过程中）。
+        //
+        // 做法：指令里 method_idx 那一位先留空，由 PoolInjector 在算好
+        // `newMethodIdx` 后填入（[PoolInjector.InsnPatch.methodIdxWord]）。
+        // 于是全程只有**一次**池重排、一份产物。
+        val warnings = mutableListOf<String>()
         if (spec.calls.isEmpty()) {
             return Result.NotApplicable("没有要插入的调用")
         }
 
-        val warnings = mutableListOf<String>()
-
-        // ── 第一步：确保所有被引用的方法都在池里 ──
-        var workDex = dexBytes
-        var poolInjected = false
-        var reHeader = header
-
-        for (call in spec.calls) {
-            val sig = "(" + call.paramTypes.joinToString("") + ")" + call.returnType
-            val existing = DexPatcher.resolveMethodIndex(workDex, call.owner, call.name, sig)
-            if (existing != null) continue
-
-            val poolResult = PoolInjector.addMethodRef(
-                workDex,
-                PoolInjector.MethodRefRequest(
-                    owner = call.owner,
-                    name = call.name,
-                    paramTypes = call.paramTypes,
-                    returnType = call.returnType,
-                )
-            )
-            when (poolResult) {
-                is PoolInjector.Result.Ok -> {
-                    workDex = poolResult.dex
-                    poolInjected = true
-                    warnings += "已向池注入 ${call.owner}->${call.name}（methodIdx=${poolResult.methodIdx}）"
-                }
-                is PoolInjector.Result.Failed ->
-                    return Result.NotApplicable("池注入失败：${poolResult.reason}")
-            }
-            reHeader = DexPatcher.codeHeader(
-                workDex, spec.ownerType, spec.methodName, spec.methodSignature
-            ) ?: return Result.NotApplicable("池注入后找不到目标方法")
-        }
-
-        // ── 第二步：编码所有调用 ──
-        val encoded = mutableListOf<Short>()
         var usedRange = false
-
         for (call in spec.calls) {
-            val sig = "(" + call.paramTypes.joinToString("") + ")" + call.returnType
-            val methodIdx = DexPatcher.resolveMethodIndex(workDex, call.owner, call.name, sig)
-                ?: return Result.NotApplicable("池注入后仍找不到 ${call.owner}->${call.name}")
-
             if (call.registers.any { it.startsWith("v") }) {
                 warnings += "引用了 v 寄存器（${call.registers.joinToString()}）：" +
                     "方法开头它可能尚未赋值，运行时可能异常；建议改用 p0/p1 等参数寄存器"
             }
+        }
 
+        // 编码：method_idx 位置写 0 占位，稍后由 PoolInjector 填
+        val encoded = mutableListOf<Short>()
+        for (call in spec.calls) {
             when (val r = InstructionEncoder.encode(
-                call, methodIdx, reHeader.registersSize, reHeader.insSize
+                call, 0, header.registersSize, header.insSize,
             )) {
                 is InstructionEncoder.Result.Ok -> {
                     encoded += r.insns.toList()
@@ -147,7 +121,6 @@ object FastInjector {
                     return Result.NotApplicable("指令编码失败：${r.reason}")
             }
         }
-
         if (usedRange && spec.calls.none { it.rangeForm }) {
             warnings += "寄存器超出 v15 或超过 5 个，已自动改用 /range 形态"
         }
@@ -166,8 +139,10 @@ object FastInjector {
         //
         // 代价是要多跑一遍池重排：第一次先确保新增方法进了池（才能编码出 method_idx），
         // 第二次带上指令一起落盘。第二次池里已经有那个方法，不会重复添加。
+        // 再看一次：方法若已在 workDex 里（第一步刚注入的），
+        // addMethodRef 会走「幂等 + 只插指令」分支，不再重排池。
         val patched = PoolInjector.addMethodRef(
-            workDex,
+            dexBytes,
             PoolInjector.MethodRefRequest(
                 owner = spec.calls.first().owner,
                 name = spec.calls.first().name,
@@ -187,8 +162,13 @@ object FastInjector {
                 injectedCount = spec.calls.size,
                 warnings = warnings,
                 note = buildString {
-                    if (poolInjected) append("池注入 + ")
-                    append("指令注入：${dexBytes.size} → ${patched.dex.size} 字节")
+                    append("池注入 + 指令注入：${dexBytes.size} → ${patched.dex.size} 字节")
+                    // ⚠️ 必须把 PoolInjector 的 note 接进来。
+                    // 它带着**分段耗时**（`1-read-sections=52ms 10b-annot=2642ms …`），
+                    // 自己另拼一句会把它丢掉 —— 那样用户看到「注入 13 秒」时
+                    // 完全不知道慢在哪一段，只能回来问我，我也只能靠猜。
+                    append(" ｜ ")
+                    append(patched.note)
                 },
             )
             is PoolInjector.Result.Failed ->

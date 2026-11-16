@@ -104,6 +104,21 @@ internal class GrowableBuffer(initialCapacity: Int) {
         len += b.size
     }
 
+    /**
+     * 追加 [b] 的 `[from, from+count)` 区间。
+     *
+     * 用于「源缓冲比实际内容长」的场景（如复用的 ByteSink），
+     * 避免先 `copyOf(len)` 复制一份再写。
+     */
+    fun bytes(b: ByteArray, from: Int, count: Int) {
+        require(from >= 0 && count >= 0 && from + count <= b.size) {
+            "区间越界：from=$from count=$count 数组长=${b.size}"
+        }
+        ensure(count)
+        System.arraycopy(b, from, buf, len, count)
+        len += count
+    }
+
     /** 补 0 到 [alignment] 的整数倍，返回补了几个字节。 */
     fun align(alignment: Int): Int {
         val pad = paddingTo(len, alignment)
@@ -164,6 +179,14 @@ internal class GrowableBuffer(initialCapacity: Int) {
     }
 
     fun toByteArray(): ByteArray = buf.copyOf(len)
+
+    /**
+     * 直接拿到内部数组（长度可能大于 [size]）。
+     *
+     * 配合 [bytes] 的 (from, count) 重载，可以「按区间追加」而不必先
+     * `toByteArray()` 复制一份 —— 3.5 万个注解项时那点复制会显著拖慢手机端。
+     */
+    fun raw(): ByteArray = buf
 
     companion object {
         /** [position] 需要再补几字节才能落到 [alignment] 的整数倍上。 */

@@ -458,6 +458,34 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
 
+            // 把本次执行的完整日志写成文件，放在 App 自己的外部目录。
+            //
+            // 【为什么写文件而不是 logcat】`core/` 层禁止 android.util.Log，
+            // 而 `System.err` / `println` 在 App 里被重定向到 /dev/null，
+            // 根本不进 logcat —— 之前加的计时全白加了，用户看不到。
+            // 写文件最直接：路径固定、内容完整、随时可取。
+            runCatching {
+                val dir = app.getExternalFilesDir(null) ?: return@runCatching
+                dir.mkdirs()
+                val f = java.io.File(dir, "inject-log.txt")
+                f.writeText(
+                    buildString {
+                        append("ApkForge 执行日志（${state.steps.size} 行）\n")
+                        append("源包: ${apk.name}\n")
+                        append("总耗时: ${System.currentTimeMillis() - startedAt}ms\n")
+                        append("产物: ${savedPath ?: "（无）"}\n")
+                        append("─".repeat(60)).append('\n')
+                        state.steps.forEach { s ->
+                            append("+%.2fs".format(s.atMs / 1000.0))
+                            append("  [${s.stage.label}] ${s.label}")
+                            if (s.detail.isNotBlank()) append("  ${s.detail}")
+                            if (s.warn) append("  ⚠")
+                            append('\n')
+                        }
+                    }
+                )
+            }
+
             val elapsed = System.currentTimeMillis() - startedAt
             val ok = r.ok && savedPath != null
             state = state.copy(

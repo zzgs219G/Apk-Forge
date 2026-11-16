@@ -344,11 +344,14 @@ class ApkInjectPipeline {
                     // 实测 40MB dex 从 ~9000ms 降到 ~80ms。
                     // 不适用时（新建方法 / 替换方法体 / 带 try-catch / 引用不在池里）
                     // 会返回 NotApplicable，那时退回全量 DexPool 路径并说明原因。
+                    val tFast0 = System.nanoTime()
                     val fast = FastInjector.tryInject(newDexBytes, spec)
+                    val fastMs = (System.nanoTime() - tFast0) / 1_000_000
                     if (fast is FastInjector.Result.Injected) {
                         step(
                             Stage.INJECT, "注入调用（增量）",
-                            "在 ${t.point.name} 开头插入 ${fast.injectedCount} 条调用 · ${fast.note}",
+                            "在 ${t.point.name} 开头插入 ${fast.injectedCount} 条调用 · " +
+                                "${fastMs}ms · ${fast.note}",
                             sub = (i + 1).toFloat() / plan.targets.size,
                         )
                         fast.warnings.forEach { step(Stage.INJECT, "警告", it, warn = true) }

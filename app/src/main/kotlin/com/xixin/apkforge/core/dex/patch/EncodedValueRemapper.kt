@@ -77,7 +77,7 @@ internal object EncodedValueRemapper {
     fun readAndWrite(
         data: ByteArray,
         pos: Int,
-        out: MutableList<Byte>,
+        out: ByteSink,
         maps: Maps,
     ): Int {
         val b = data[pos].toInt() and 0xFF
@@ -108,22 +108,22 @@ internal object EncodedValueRemapper {
                 }
                 // 重映射后仍用「能容纳该值的最小字节数」写，保持结构紧凑且合法
                 val newLen = byteWidthOf(mapped)
-                out += (((newLen - 1) shl 5) or valueType).toByte()
+                out.u8(((newLen - 1) shl 5) or valueType)
                 for (i in 0 until newLen) {
-                    out += ((mapped.toLong() ushr (i * 8)) and 0xFF).toByte()
+                    out.u8(((mapped.toLong() ushr (i * 8)) and 0xFF).toInt())
                 }
             }
 
             VT_ANNOTATION -> {
-                out += b.toByte()
+                out.u8(b)
                 p = readAnnotation(data, p, out, maps)
             }
 
             VT_ARRAY -> {
-                out += b.toByte()
+                out.u8(b)
                 val (count, n) = Leb128.readUleb128(data, p)
                 p += n
-                Leb128.writeUleb128(out, count)
+                out.uleb128(count)
                 repeat(count.toInt()) {
                     p = readAndWrite(data, p, out, maps)
                 }
@@ -131,14 +131,14 @@ internal object EncodedValueRemapper {
 
             VT_NULL, VT_BOOLEAN -> {
                 // 无负载：value_arg 就是值本身
-                out += b.toByte()
+                out.u8(b)
             }
 
             VT_BYTE, VT_SHORT, VT_CHAR, VT_INT, VT_LONG, VT_FLOAT, VT_DOUBLE -> {
                 // 数值：负载长度 = value_arg + 1，原样拷贝
                 val len = valueArg + 1
-                out += b.toByte()
-                for (i in 0 until len) out += data[p + i]
+                out.u8(b)
+                for (i in 0 until len) out.u8(data[p + i].toInt() and 0xFF)
                 p += len
             }
 
@@ -162,22 +162,22 @@ internal object EncodedValueRemapper {
     fun readAnnotation(
         data: ByteArray,
         pos: Int,
-        out: MutableList<Byte>,
+        out: ByteSink,
         maps: Maps,
     ): Int {
         var p = pos
         val (typeIdx, n1) = Leb128.readUleb128(data, p)
         p += n1
-        Leb128.writeUleb128(out, maps.typeMap[typeIdx.toInt()].toLong())
+        out.uleb128(maps.typeMap[typeIdx.toInt()].toLong())
 
         val (size, n2) = Leb128.readUleb128(data, p)
         p += n2
-        Leb128.writeUleb128(out, size)
+        out.uleb128(size)
 
         repeat(size.toInt()) {
             val (nameIdx, n3) = Leb128.readUleb128(data, p)
             p += n3
-            Leb128.writeUleb128(out, maps.stringMap[nameIdx.toInt()].toLong())
+            out.uleb128(maps.stringMap[nameIdx.toInt()].toLong())
             p = readAndWrite(data, p, out, maps)
         }
         return p

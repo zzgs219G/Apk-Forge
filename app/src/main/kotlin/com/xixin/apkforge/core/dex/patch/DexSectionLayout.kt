@@ -35,12 +35,31 @@ package com.xixin.apkforge.core.dex.patch
  */
 internal object DexSectionLayout {
 
-    /** 段定义。[render] 延迟到排版时调用。 */
+    /** 段定义。 */
     class Section(
         val type: Int,
         val count: Int,
-        val render: () -> ByteArray,
-    )
+        /**
+         * 段的长度（字节）。**不要**为了拿长度就去 `toByteArray()` ——
+         * 那会为 30MB 的段复制一份完整副本，在手机上直接 OOM。
+         */
+        val size: Int,
+        /**
+         * 把段内容写进 [target]。默认实现是「生成字节数组再写入」；
+         * 大数据段应覆写它以直接写入，避免中间副本。
+         */
+        val writeTo: (GrowableBuffer) -> Unit,
+    ) {
+        constructor(type: Int, count: Int, render: () -> ByteArray) : this(
+            type, count,
+            size = run {
+                // 只在没有更便宜的途径时才渲染一次取长度。
+                // 调用方应尽量用带 size 的构造器。
+                render().size
+            },
+            writeTo = { target -> target.bytes(render()) },
+        )
+    }
 
     /** 需要 1 字节对齐的段；其余按 4 对齐。与 ART `CheckIntraSectionIterate` 一致。 */
     fun alignmentOf(type: Int): Int = when (type) {
@@ -97,13 +116,13 @@ internal object DexSectionLayout {
         // 至少 1 个 header 项 + 各段 + map_list
         val mapItemCount = sections.size + 2
 
+        // ⚠️ 两遍渲染：第一遍只取长度、算容量；第二遍才真正产出字节并立即写入。
+        // 单遍「先渲染全部段、再拼装」会同时持有两份完整数据 ——
+        // 29.9MB 的 dex 上实测直接 OOM：
+        // `Failed to allocate a 29989720 byte allocation`（堆上限 256MB）。
+        // 渲染过程本身是纯函数（只读输入、不依赖外部状态），跑两遍是安全的。
         var estimate = headerSize + 64 * 1024
-        val rendered = ArrayList<ByteArray>(sections.size)
-        sections.forEach {
-            val b = it.render()
-            rendered += b
-            estimate += b.size + 8
-        }
+        sections.forEach { estimate += it.size + 8 }
         estimate += 8 + mapItemCount * DexFormat.MAP_ITEM_WIDTH
 
         val out = GrowableBuffer(estimate)
@@ -129,7 +148,7 @@ internal object DexSectionLayout {
             if (dataOffset < 0 && isDataSection(s.type)) dataOffset = out.position
             offsets[s.type] = out.position
             counts[s.type] = s.count
-            out.bytes(rendered[i])
+            s.writeTo(out)
         }
         if (dataOffset < 0) dataOffset = out.position
         val dataSectionEnd = out.position
