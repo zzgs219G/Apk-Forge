@@ -119,7 +119,18 @@ class ApkInjectPipeline {
         null
     }
 
-    suspend fun run(input: Input, onStep: (Step) -> Unit = {}): Result =
+    /**
+     * @param onStep 每个里程碑回调一次，会**追加**到日志列表
+     * @param onTick 只更新进度与「当前正在做什么」的单行摘要，**不追加日志**。
+     *               用于大条目压缩这类「一件事要干两秒」的场景：
+     *               进度条要动、单行日志要变，但日志列表不该被同一件事刷屏。
+     */
+    suspend fun run(
+        input: Input,
+        /** 高频状态回调，放在 onStep 之前以免破坏既有的尾随 lambda 调用点 */
+        onTick: ((progress: Float, line: String) -> Unit)? = null,
+        onStep: (Step) -> Unit = {},
+    ): Result =
         withContext(Dispatchers.IO) {
             val steps = mutableListOf<Step>()
             val t0 = System.nanoTime()
@@ -441,6 +452,8 @@ class ApkInjectPipeline {
                 )
                 // 条目可能上千，全部上报会把日志刷成噪音；按总量切 ~60 段采样
                 var lastReported = -1
+                var repackIndex = 0
+                var repackTotal = 1
                 val stats = ApkRepackager.repack(
                     sourceApk = input.sourceApk,
                     outputApk = input.outputApk,
@@ -448,6 +461,8 @@ class ApkInjectPipeline {
                     newDexBytes = newDexBytes,
                     payloadDexBytes = payloadBytes,
                     onEntry = { index, total, name ->
+                        repackIndex = index
+                        repackTotal = total
                         val bucket = if (total <= 60) index else index * 60 / total
                         if (bucket != lastReported) {
                             lastReported = bucket
@@ -456,6 +471,20 @@ class ApkInjectPipeline {
                                 sub = index.toFloat() / total,
                             )
                         }
+                    },
+                    // 大条目（classes2.dex 12.5MB）压缩要 2 秒，期间必须让进度动起来，
+                    // 否则用户看到的就是「76/147 卡死两秒」。
+                    // 这里只更新进度条与单行摘要，**不新增 step 记录** ——
+                    // 50 次回调若每次都存一行，日志会被同一个条目的百分比刷屏。
+                    onBytes = { written, totalBytes, name ->
+                        val frac = if (totalBytes <= 0) 0f else written.toFloat() / totalBytes
+                        val entryBase = repackIndex.toFloat() / repackTotal
+                        val entrySpan = 1f / repackTotal
+                        onTick?.invoke(
+                            progressOf(Stage.REPACK, entryBase + entrySpan * frac),
+                            "写入 $name  ${(frac * 100).toInt()}%  " +
+                                "${mb(written.toLong())}/${mb(totalBytes.toLong())}",
+                        )
                     },
                 )
                 step(

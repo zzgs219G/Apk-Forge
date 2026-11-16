@@ -310,6 +310,9 @@ private fun RunningBody(state: ConsoleUiState, modifier: Modifier = Modifier) {
         // 它替代了上一版「一列条目滚动」的主视觉——用户当时要的就是这一行。
         LiveLine(
             step = current,
+            // 高频状态（大条目压缩百分比）优先于最后一个里程碑：
+            // 它才是「此刻在做什么」。里程碑在压缩结束时会被新的一行取代。
+            liveText = state.liveLine.takeIf { it.isNotBlank() },
             count = state.steps.size,
             open = historyOpen,
             onToggle = { historyOpen = !historyOpen },
@@ -350,6 +353,7 @@ private fun RunningBody(state: ConsoleUiState, modifier: Modifier = Modifier) {
 @Composable
 private fun LiveLine(
     step: ApkInjectPipeline.Step?,
+    liveText: String?,
     count: Int,
     open: Boolean,
     onToggle: () -> Unit,
@@ -391,9 +395,12 @@ private fun LiveLine(
                     color = if (step?.warn == true) MaterialTheme.colorScheme.error
                     else MaterialTheme.colorScheme.onSurface,
                 )
-                if (!step?.detail.isNullOrBlank()) {
+                // 高频状态（如「写入 classes2.dex 42% 5.2MB/12.5MB」）。
+                // 它比最后一条里程碑更新，所以优先显示；没有时回落到里程碑的 detail。
+                val second = liveText ?: step?.detail
+                if (!second.isNullOrBlank()) {
                     Text(
-                        step.detail,
+                        second,
                         style = MaterialTheme.typography.labelSmall.copy(
                             fontFamily = FontFamily.Monospace,
                         ),

@@ -57,6 +57,14 @@ object ApkRepackager {
         payloadDexBytes: ByteArray?,
         /** 每写一个条目回调一次（index 从 1 开始，total 含目录条目）。用于进度与日志。 */
         onEntry: ((index: Int, total: Int, name: String) -> Unit)? = null,
+        /**
+         * 单个大条目写出时的字节进度回调 `(已写, 总字节, 条目名)`。
+         *
+         * 【为什么需要】`classes2.dex` 12.5MB，DEFLATE 压缩在手机上要 2 秒。
+         * 只靠 [onEntry] 的话，这 2 秒里进度条从 76/147 冻到 79/147 不动，
+         * 用户会以为软件卡死。按块回调能让进度平滑走完。
+         */
+        onBytes: ((written: Int, total: Int, name: String) -> Unit)? = null,
     ): Stats {
         val zip = ZipFile(sourceApk)
         var entryCount = 0
@@ -99,7 +107,11 @@ object ApkRepackager {
                         zip.getInputStream(entry).use { it.readBytesCompat() }
                     }
 
-                    writeEntry(out, entry, bytes, sourceLayout.alignmentOf(entry.name), counter.count)
+                    writeEntry(
+                        out, entry, bytes,
+                        sourceLayout.alignmentOf(entry.name), counter.count,
+                        onBytes = { w, t -> onBytes?.invoke(w, t, entry.name) },
+                    )
                     entryCount++
                     onEntry?.invoke(entryCount, total, entry.name)
                 }
@@ -111,7 +123,10 @@ object ApkRepackager {
                         time = 0L   // 与 AGP 产物一致：固定时间戳，保证可复现
                     }
                     // 新增的 dex 没有「原有对齐」可抄，跟随包里已有 dex 的对齐
-                    writeEntry(out, e, payloadDexBytes, payloadAlign, counter.count)
+                    writeEntry(
+                        out, e, payloadDexBytes, payloadAlign, counter.count,
+                        onBytes = { w, t -> onBytes?.invoke(w, t, addedName) },
+                    )
                     entryCount++
                     onEntry?.invoke(entryCount, total, addedName)
                 }
@@ -152,6 +167,8 @@ object ApkRepackager {
         data: ByteArray,
         align: Int,
         wireOffset: Long,
+        /** 大条目写出时按块回调 (已写字节, 总字节)，用于让进度条平滑推进 */
+        onBytes: ((written: Int, total: Int) -> Unit)? = null,
     ) {
         val nameLen = src.name.toByteArray(Charsets.UTF_8).size
         val e = ZipEntry(src.name).apply {
@@ -172,7 +189,21 @@ object ApkRepackager {
             if (pad > 0) e.extra = ByteArray(pad)   // 裸 0 填充，与 AGP 一致
         }
         out.putNextEntry(e)
-        out.write(data)
+        // 【为什么分块写】`classes2.dex` 12.5MB，DEFLATE 压缩在手机上要 2 秒。
+        // 整块 `out.write(data)` 期间没有任何回调，进度条会从 76/147 冻到 79/147，
+        // 用户会以为卡死。按 256KB 分块，每块回调一次，进度就能平滑走。
+        if (onBytes != null && data.size > CHUNK) {
+            var off = 0
+            while (off < data.size) {
+                val n = minOf(CHUNK, data.size - off)
+                out.write(data, off, n)
+                off += n
+                onBytes(off, data.size)
+            }
+        } else {
+            out.write(data)
+            onBytes?.invoke(data.size, data.size)
+        }
         out.closeEntry()
     }
 
@@ -217,6 +248,15 @@ object ApkRepackager {
     // ────────────────────────── 对齐 ──────────────────────────
 
     private const val LOCAL_HEADER_SIZE = 30
+
+    /**
+     * 写大条目时的分块大小。
+     *
+     * 256KB 是折中：太小（如 8KB）回调次数过多反而拖慢压缩，
+     * 太大（如 2MB）进度会一跳一大格、看起来还是卡的。
+     * 12.5MB 的 `classes2.dex` 按 256KB 分块约 50 次回调 —— 肉眼是连续的。
+     */
+    private const val CHUNK = 256 * 1024
     private const val EOCD_SIZE = 22
     private const val EOCD_SIG = 0x06054b50
     private const val APK_SIG_BLOCK_MAGIC = "APK Sig Block 42"

@@ -78,6 +78,15 @@ data class ConsoleUiState(
     val steps: List<ApkInjectPipeline.Step> = emptyList(),
     val progress: Float = 0f,
     val stage: ApkInjectPipeline.Stage? = null,
+    /**
+     * 进度条上方那行「正在做什么」。
+     *
+     * 与 [steps] 的区别：`steps` 只记里程碑，会一直留在日志里；
+     * 这个是**当前状态**，会被高频覆盖（如大条目压缩时的百分比）。
+     * 两者分开的原因是：把一个 12.5MB 条目的 50 次百分比回调都塞进 `steps`，
+     * 日志会被刷屏，真正的里程碑反而看不见了。
+     */
+    val liveLine: String = "",
     val result: ApkInjectPipeline.Result? = null,
     /** 落盘后的产物路径（Download/ApkForge/xxx.apk） */
     val savedPath: String? = null,
@@ -428,13 +437,37 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                 payloadDex = snapshot.payloadDex,
             )
 
-            val r = pipeline.run(input) { s ->
-                state = state.copy(
-                    steps = state.steps + s,
-                    stage = s.stage,
-                    progress = maxOf(state.progress, s.progress),
-                )
-            }
+            // onTick 的节流游标：上一次更新时进度是百分之几
+            var lastTickPct = -1
+            val r = pipeline.run(
+                input,
+                onStep = { s ->
+                    state = state.copy(
+                        steps = state.steps + s,
+                        stage = s.stage,
+                        progress = maxOf(state.progress, s.progress),
+                        // 里程碑给了新的一行，就把「正在做什么」换成它
+                        liveLine = s.label + if (s.detail.isNotBlank()) "  ${s.detail}" else "",
+                    )
+                },
+                // 大条目压缩期间的高频回调：只推进度条和单行摘要，不追加日志。
+                // 若这里也 `steps + s`，12.5MB 的 classes2.dex 会刷出 50 行「写入 xx%」，
+                // 把真正的里程碑全挤没了。
+                //
+                // 【为什么要节流】这个回调每 256KB 触发一次，12.5MB 就是 50 次。
+                // 每次都 `state.copy` 会触发 Compose 重组；百分比只差 2% 时重组毫无意义，
+                // 却要和压缩抢主线程。限制成「百分比变化 ≥ 2% 才更新」。
+                onTick = { p, line ->
+                    val pct = (p * 100).toInt()
+                    if (pct - lastTickPct >= 2 || pct >= 100) {
+                        lastTickPct = pct
+                        state = state.copy(
+                            progress = maxOf(state.progress, p),
+                            liveLine = line,
+                        )
+                    }
+                },
+            )
 
             // 落盘：正式产物进 Download/ApkForge/，临时文件立刻清掉
             var savedPath: String? = null
