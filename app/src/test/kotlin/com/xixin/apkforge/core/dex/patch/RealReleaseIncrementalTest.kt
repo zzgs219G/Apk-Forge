@@ -30,11 +30,13 @@ class RealReleaseIncrementalTest {
     private fun locateReleaseApk(): File? {
         val p = System.getProperty("apkforge.releaseApk") ?: System.getenv("APKFORGE_RELEASE_APK")
         p?.let { val f = File(it); if (f.isFile) return f }
-        // 依次找：home 目录、项目根、模块目录。
-        // Gradle 的 test 任务工作目录默认是模块目录（app/），
-        // 而 `user.home` 在不同环境（本地 Termux / CI runner）下不一定是同一个地方，
-        // 所以两边都查。
+        // 优先用 assembleRelease 的产物：它就是本 App 的正式包，
+        // 3 个 dex / classes.dex 29.9MB / 16722 类 / dex 039 / R8 混淆形态，
+        // 与线上发布的一致。用自己构建的包当靶子，不依赖外部样本。
         val candidates = buildList {
+            add(File("build/outputs/apk/release/app-release-unsigned.apk"))
+            add(File("app/build/outputs/apk/release/app-release-unsigned.apk"))
+            add(File("../app/build/outputs/apk/release/app-release-unsigned.apk"))
             System.getProperty("user.home")?.let { add(File(it, "sample-release.apk")) }
             add(File("sample-release.apk"))
             add(File("app/sample-release.apk"))

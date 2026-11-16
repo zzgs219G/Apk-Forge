@@ -99,15 +99,22 @@ jobs:
           head -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q "dex" || {
             echo "❌ 示例 dex 魔数错误"; exit 1; }
 
-      # 测试靶子必须先构建出来
-      - name: 预构建测试靶子（app-debug.apk）
+      # 测试靶子必须先构建出来。
+      # 靶子就是本 App 自己的产物：
+      # - release 包（classes.dex 29.9MB / 16722 类 / R8 混淆）→ 主靶子
+      # - debug 包（17 个 dex）→ 回退靶子
+      # 先 assembleRelease 才能让 RealReleaseApkTest 拿到最接近线上的形态。
+      - name: 预构建测试靶子
         run: |
           set -o pipefail
           mkdir -p build-log
-          ./gradlew assembleDebug \
+          ./gradlew assembleDebug assembleRelease \
             -Dorg.gradle.jvmargs="-Xmx4g" \
+            -x lintVitalAnalyzeRelease -x lintVitalRelease \
             --stacktrace --console=plain \
             2>&1 | tee build-log/prebuild.log
+          echo "---- 靶子 ----"
+          ls -la app/build/outputs/apk/release/ app/build/outputs/apk/debug/
 
       - name: 跑单元测试
         run: |

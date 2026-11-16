@@ -38,11 +38,15 @@ class PoolInjectorTest {
     private fun locateReleaseApk(): File? {
         val p = System.getProperty("apkforge.releaseApk") ?: System.getenv("APKFORGE_RELEASE_APK")
         p?.let { val f = File(it); if (f.isFile) return f }
-        // 优先真实 release 包（52MB，最接近线上形态）。
-        // 找不到时回退到 app-debug.apk —— 云端 CI 上靠 Release 附件提供样本，
-        // 万一下载失败，回退到 debug 包至少能覆盖池重排的主体逻辑，
+        // 优先用 assembleRelease 的产物：它就是本 App 的正式包，
+        // classes.dex 29.9MB / 16722 类 / dex 039 / R8 混淆形态，与线上一致。
+        // 它是本工程自己构建的，CI 上一定有（测试前会先 assembleRelease）。
+        // 找不到时回退到 app-debug.apk，至少覆盖池重排的主体逻辑 ——
         // 而不是让整组测试 skip（CI 绿了却一条核心测试没跑，等于没测）。
         val candidates = buildList {
+            add(File("build/outputs/apk/release/app-release-unsigned.apk"))
+            add(File("app/build/outputs/apk/release/app-release-unsigned.apk"))
+            add(File("../app/build/outputs/apk/release/app-release-unsigned.apk"))
             System.getProperty("user.home")?.let { add(File(it, "sample-release.apk")) }
             add(File("sample-release.apk"))
             add(File("../sample-release.apk"))

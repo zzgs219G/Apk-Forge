@@ -30,14 +30,25 @@ class RealReleaseApkTest {
     private fun locateReleaseApk(): File? {
         val p = System.getProperty("apkforge.releaseApk") ?: System.getenv("APKFORGE_RELEASE_APK")
         p?.let { val f = File(it); if (f.isFile) return f }
-        // 依次找：home 目录、项目根、模块目录。
-        // Gradle 的 test 任务工作目录默认是模块目录（app/），
-        // 而 `user.home` 在本地 Termux 与 CI runner 上不是同一个地方，所以两边都查。
+        // 【为什么优先用 assembleRelease 的产物】
+        // 它就是这个 App 的正式包本身：3 个 dex、classes.dex 29.9MB、
+        // 16722 个类、dex 039、R8 混淆后的真实形态 —— 和线上发布的完全一样。
+        // 用它当靶子意味着「测试的输入 == 我们发出去的东西」，不需要外部样本，
+        // 也不会出现「样本和产物不同步」的问题。
+        //
+        // 后面几项是给旧流程留的后路（外部样本、debug 包）。
+        // Gradle test 的工作目录是模块目录（app/），所以路径要照顾这几种写法。
         val candidates = buildList {
+            add(File("build/outputs/apk/release/app-release-unsigned.apk"))
+            add(File("app/build/outputs/apk/release/app-release-unsigned.apk"))
+            add(File("../app/build/outputs/apk/release/app-release-unsigned.apk"))
             System.getProperty("user.home")?.let { add(File(it, "sample-release.apk")) }
             add(File("sample-release.apk"))
             add(File("app/sample-release.apk"))
             add(File("../sample-release.apk"))
+            add(File("build/outputs/apk/debug/app-debug.apk"))
+            add(File("app/build/outputs/apk/debug/app-debug.apk"))
+            add(File("../app/build/outputs/apk/debug/app-debug.apk"))
         }
         return candidates.firstOrNull { it.isFile }
     }
