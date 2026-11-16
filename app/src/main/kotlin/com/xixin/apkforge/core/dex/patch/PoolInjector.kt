@@ -274,12 +274,57 @@ internal object PoolInjector {
                 out.bytes(Mutf8Codec.encodeItem(s))
             }
 
+            // 旧 code_off → 新 code_off（带 try 的方法要重写整个 code_item）
+            val movedCodeItems = HashMap<Int, Int>()
+
+            // ── 10b-3. 重写带 try/catch 的 code_item ──
+            // `try_item` 的 exception_handler.type_idx 也是池下标，池重排后必须改，
+            // 否则 catch 到的异常类型完全错乱（实测 IllegalAccessException 变成 java.lang.Float）。
+            //
+            // 且 type_idx 是 uleb128，改后长度可能变，导致 handler_off 失效 ——
+            // 所以必须整体重编码整个 code_item 并追加到末尾。
+            run {
+                val codeOffsWithTries = HashSet<Int>()
+                sec.classDefs.forEach { cd ->
+                    if (cd.classDataOff == 0L) return@forEach
+                    val parsed = runCatching {
+                        ClassDataItem.parse(dexBytes, cd.classDataOff.toInt())
+                    }.getOrNull() ?: return@forEach
+                    parsed.directCodeOffsets.forEach { if (it > 0) codeOffsWithTries += it.toInt() }
+                    parsed.virtualCodeOffsets.forEach { if (it > 0) codeOffsWithTries += it.toInt() }
+                }
+                codeOffsWithTries.forEach { co ->
+                    if (co + DexFormat.CI_INSNS > dexBytes.size) return@forEach
+                    val r = TryBlockRemapper.remap(dexBytes, co, typeIndexMap) ?: return@forEach
+                    // 重建整个 code_item：头部 + 指令 + padding + tries + handlers
+                    val buf0 = src
+                    val insnsSize = buf0.u32AsInt(co + DexFormat.CI_INSNS_SIZE, "insns")
+                    val rewritten = GrowableBuffer(DexFormat.CI_INSNS + insnsSize * 2 + r.tries.size + r.handlers.size + 8)
+                    // 头部 16 字节原样（registers/ins/outs/tries/debug_off/insns_size）
+                    for (i in 0 until 16) rewritten.u8(dexBytes[co + i].toInt())
+                    // 指令区原样
+                    val insnsStart = co + DexFormat.CI_INSNS
+                    for (i in 0 until insnsSize * 2) rewritten.u8(dexBytes[insnsStart + i].toInt())
+                    // padding
+                    if ((insnsSize and 1) != 0) rewritten.u16(0)
+                    // 新的 tries 与 handlers
+                    rewritten.bytes(r.tries)
+                    rewritten.bytes(r.handlers)
+                    out.align(4)
+                    val newCo = out.position
+                    out.bytes(rewritten.toByteArray())
+                    // 记录「旧 code_off → 新 code_off」，供 class_data 回填
+                    movedCodeItems[co] = newCo
+                }
+            }
+
             // ── 10b. 重写所有 class_data_item ──
             // 池里插了新条目，后面所有下标都偏移了，而 class_data_item 存的是下标。
             // 且它们是变长差分编码，只能整体重编码后追加到文件末尾。
             val remapMaps = ClassDataRemapper.Maps(
                 fieldMap = fieldIndexMap,
                 methodMap = methodIndexMap,
+                codeOffMap = movedCodeItems,
             )
             val newClassDataOffsets = HashMap<Int, Int>()   // 旧偏移 → 新偏移
             sec.classDefs.forEach { cd ->
@@ -413,6 +458,7 @@ internal object PoolInjector {
                     methodLookupInsn["$c|$n|(" + pp.joinToString("") + ")" + r] ?: -1
                 },
                 protoIdx = { pp, r -> protoLookup["(" + pp.joinToString("") + ")" + r] ?: -1 },
+                codeOffMap = movedCodeItems,
             )
             // 自检：有方法却一条都没收集到，说明定位失败（静默跳过是致命错误）
             if (insnPatches.isEmpty() && sec.methods.isNotEmpty()) {
@@ -513,6 +559,32 @@ internal object PoolInjector {
                 out.u32(e.value.nameString.toLong())
             }
 
+            // ── static_values：静态字段初值也是池下标 ──
+            // `static final String X = "..."` 的初值存在 encoded_array 里，
+            // 元素是 string_idx / type_idx。不改的话常量会变成别的内容
+            // —— 实测 `"android:support:activity-result"` 变成了
+            // `"android.window.PROPERTY_COMPAT_ALLOW_USER_ASPECT_RATIO_OVERRIDE"`。
+            val newStaticValuesOffsets = HashMap<Int, Int>()
+            val staticValueArrays = LinkedHashSet<Int>()
+            sec.classDefs.forEach { cd ->
+                if (cd.staticValuesOff > 0 && cd.staticValuesOff < Int.MAX_VALUE) {
+                    staticValueArrays += cd.staticValuesOff.toInt()
+                }
+            }
+            staticValueArrays.forEach { oldOff ->
+                val tmp = mutableListOf<Byte>()
+                var q = oldOff
+                val (cnt2, n2) = Leb128.readUleb128(dexBytes, q)
+                q += n2
+                Leb128.writeUleb128(tmp, cnt2)
+                repeat(cnt2.toInt()) {
+                    q = EncodedValueRemapper.readAndWrite(dexBytes, q, tmp, evMaps)
+                }
+                out.align(4)
+                newStaticValuesOffsets[oldOff] = out.position
+                out.bytes(tmp.toByteArray())
+            }
+
             // 新的 class_defs
             out.align(4)
             val classDefsOff = out.position
@@ -542,7 +614,12 @@ internal object PoolInjector {
                         c.classDataOff.toInt()
                     }
                 out.u32(newCdo.toLong())
-                out.u32(c.staticValuesOff)
+                // static_values_off 指向重写后的 encoded_array
+                val newSv = if (c.staticValuesOff > 0) {
+                    (newStaticValuesOffsets[c.staticValuesOff.toInt()]
+                        ?: c.staticValuesOff.toInt()).toLong()
+                } else 0L
+                out.u32(newSv)
             }
 
             // ── 11. 重建 map_list ──

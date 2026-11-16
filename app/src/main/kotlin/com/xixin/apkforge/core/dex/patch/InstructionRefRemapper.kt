@@ -35,12 +35,20 @@ import com.android.tools.smali.dexlib2.iface.reference.TypeReference
 internal object InstructionRefRemapper {
 
     data class Patch(
-        /** 索引在**文件**里的绝对偏移 */
+        /** 索引在**文件**里的绝对偏移（原 dex 中的位置） */
         val absOffset: Int,
         val oldIndex: Int,
         val kind: Kind,
         /** 索引占 2 个字（31c jumbo 的 u32） */
         val wide: Boolean = false,
+        /**
+         * 该指令所属 code_item 的**原** code_off。
+         *
+         * 带 try/catch 的方法，其 code_item 会被整体重写并搬到文件末尾
+         * （因为 handler 的 type_idx 是 uleb128，改后长度可能变）。
+         * 那时 `absOffset` 在原位置已经无效，要按「新 code_off + 区内偏移」重算。
+         */
+        val ownerCodeOff: Int = 0,
     )
 
     enum class Kind { STRING, TYPE, FIELD, METHOD, PROTO }
@@ -48,6 +56,9 @@ internal object InstructionRefRemapper {
     /**
      * 收集一个 dex 里所有需要改的索引。
      *
+     * @param codeOffMap 旧 code_off → 新 code_off。带 try/catch 的方法其 code_item
+     *                   被搬到了新位置，`instructionStart` 在原位置已无效，
+     *                   必须按新位置重算。空表示没有搬移。
      * @return 空列表表示没有需要改的（也说明定位失败，调用方应视为异常）
      */
     fun collect(
@@ -57,15 +68,25 @@ internal object InstructionRefRemapper {
         fieldIdx: (String, String, String) -> Int,
         methodIdx: (String, String, List<String>, String) -> Int,
         protoIdx: (List<String>, String) -> Int,
+        codeOffMap: Map<Int, Int> = emptyMap(),
     ): List<Patch> {
         val out = ArrayList<Patch>()
 
         for (cls in dexFile.classes) {
             for (method in cls.methods) {
                 val impl = method.implementation ?: continue
+                // 该方法的 code_item 原位置 = 首条指令的 instructionStart - 16
+                val firstInsn = impl.instructions.firstOrNull() as?
+                    DexBackedInstruction ?: continue
+                val oldCodeOff = firstInsn.instructionStart - 16
+                val newCodeOff = codeOffMap[oldCodeOff]
+                // 搬到新位置后，区内偏移不变，只是基址变了
+                val shift = if (newCodeOff != null) newCodeOff - oldCodeOff else 0
+
                 for (insn in impl.instructions) {
                     val start = (insn as? DexBackedInstruction)?.instructionStart ?: continue
                     val ref = (insn as? ReferenceInstruction)?.reference ?: continue
+                    val base = start + shift
 
                     // ⚠️ 3rc/4rcc 的布局与直觉相反（实测 + dexlib2 验证）：
                     //   [0] op | AA          AA = 寄存器个数
@@ -81,7 +102,8 @@ internal object InstructionRefRemapper {
                     val isRangeFmt = fmt != null && (
                         fmt.name.startsWith("Format3rc") || fmt.name.startsWith("Format4rcc")
                         )
-                    val idxOffset = start + 2
+                    // ⚠️ 用 base（已按搬移量修正）而不是 start
+                    val idxOffset = base + 2
 
                     when (ref) {
                         is StringReference -> {
@@ -113,7 +135,7 @@ internal object InstructionRefRemapper {
                                 ref.parameterTypes.map { it.toString() }, ref.returnType,
                             )
                             // 45cc/4rcc 的 proto 索引固定在最后一字（+6）
-                            if (i >= 0) out += Patch(start + 6, i, Kind.PROTO)
+                            if (i >= 0) out += Patch(base + 6, i, Kind.PROTO)
                         }
                         else -> Unit
                     }

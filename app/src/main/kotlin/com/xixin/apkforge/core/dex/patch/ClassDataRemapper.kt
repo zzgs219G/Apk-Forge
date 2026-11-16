@@ -33,7 +33,18 @@ package com.xixin.apkforge.core.dex.patch
 internal object ClassDataRemapper {
 
     /** 重映射所需的两张表。`fieldMap[oldIdx] = newIdx`。 */
-    class Maps(val fieldMap: IntArray, val methodMap: IntArray)
+    class Maps(
+        val fieldMap: IntArray,
+        val methodMap: IntArray,
+        /**
+         * 旧 code_off → 新 code_off。
+         *
+         * 带 try/catch 的方法，其 code_item 会被整体重写并搬到文件末尾
+         * （因为 type_idx 是 uleb128，改后长度可能变，handler_off 会失效）。
+         * 这里传进来，重编码时把 `code_off` 换成新位置。
+         */
+        val codeOffMap: Map<Int, Int> = emptyMap(),
+    )
 
     /**
      * 重写一个 class_data_item，返回新的字节。
@@ -89,8 +100,13 @@ internal object ClassDataRemapper {
                 .sortedBy { it.first }
 
         fun remapMethods(list: List<Triple<Int, Long, Long>>): List<Triple<Int, Long, Long>> =
-            list.map { (idx, flags, off) -> Triple(maps.methodMap[idx], flags, off) }
-                .sortedBy { it.first }
+            list.map { (idx, flags, off) ->
+                // code_off 也要换成新位置（带 try 的方法其 code_item 被搬到了末尾）
+                val newOff = if (off > 0) {
+                    maps.codeOffMap[off.toInt()]?.toLong() ?: off
+                } else off
+                Triple(maps.methodMap[idx], flags, newOff)
+            }.sortedBy { it.first }
 
         val newStatic = remapFields(staticFields)
         val newInstance = remapFields(instanceFields)
