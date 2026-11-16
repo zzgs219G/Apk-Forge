@@ -102,8 +102,17 @@ sh payload/dialog/build.sh
 | `com.android.tools.smali:smali-dexlib2` | 3.0.10 | dex 读写 | 随机访问、lazy 解析、无文本往返损失 |
 | `junit` | 4.13.2 | 本地端到端验证 | 注入核心不含 Android API，可在 JVM 上跑真实 APK |
 
-弹窗载荷（`payload/`）用 `javac + d8` 直接构建，**零第三方依赖**——它会被塞进别人的 APK，
-体积和依赖面都必须克制。
+### 注入有两条路径
+
+| 路径 | 耗时（28.5MB / 16722 类） | 何时用 |
+|---|---|---|
+| `core/dex/patch/`（增量） | **约 1.1 秒** | 默认先试 |
+| `core/dex/DexCallInjector`（全量 `DexPool`） | 约 9~18 秒 | 增量不适用时回退 |
+
+增量路径之所以快，是因为它**绕开了 `DexPool` 的整池重排**：
+只插新条目、只回填真正变了的索引（约 8.5%），
+其余数据段一个字节都不重编码。代价是必须自己保证 dex 布局合法——
+ART 有四条硬约束，见 `AGENTS.md` §10。
 
 **评估后未采用**：
 
@@ -112,6 +121,9 @@ sh payload/dialog/build.sh
 - `org.smali:dexlib2`（2.5.2）— 2020 年停更，不认 dex 038/039
 - `net.dongliu:apk-parser` — 拉 bcprov/bcpkix 1.58，只为读 Manifest 不值
 - Room — 配置只有几条记录，KSP 注解处理器拖慢手机端构建，用 `org.json` 足够
+- **任何「增量 dex 写入」现成库** — `multidexlib2` / `vova7878/DexFile` /
+  `titan-dex` / `DexRewrite` 内部全是整池重排 + 全量序列化，
+  和 `DexPool` 是同一量级。这一层只能自己写。
 
 ---
 

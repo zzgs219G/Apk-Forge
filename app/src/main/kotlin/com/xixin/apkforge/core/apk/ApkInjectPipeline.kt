@@ -356,7 +356,37 @@ class ApkInjectPipeline {
                     // 不适用时（新建方法 / 替换方法体 / 带 try-catch / 引用不在池里）
                     // 会返回 NotApplicable，那时退回全量 DexPool 路径并说明原因。
                     val tFast0 = System.nanoTime()
-                    val fast = FastInjector.tryInject(newDexBytes, spec)
+                    // 注入要 1 秒以上，期间必须让「现在在干什么」动起来。
+                    // 阶段名来自 PoolInjector 内部的 lap()，这里是给用户看的中文说明。
+                    val stageText = mapOf(
+                        "1-read-sections" to "读取各段索引",
+                        "2-read-strings" to "解析字符串池",
+                        "5-types" to "合并类型池",
+                        "7-fields" to "重排字段池",
+                        "9-classdefs" to "重排类定义",
+                        "10b-3a-locate" to "定位注入点",
+                        "10b-3b-prepare" to "准备重写方法体",
+                        "10b-codeitem-done" to "重建方法体",
+                        "10b-annot-done" to "重写注解",
+                        "10c-typelist-done" to "重写参数表",
+                        "11-ids-done" to "重建 id 表",
+                        "11a-static-values" to "重写静态初值",
+                        "11c-classdata" to "重写类数据",
+                        "11b-classdefs-buf" to "重建类定义表",
+                        "12-layout" to "排版 dex 各段",
+                        "12a-before-fillback" to "回填交叉引用",
+                        "12a-fillback-done" to "回填完成",
+                        "12b-insn-patch" to "回填指令索引",
+                    )
+                    val fast = FastInjector.tryInject(newDexBytes, spec) { stage ->
+                        // 「10b-annot-done 15334」这种带统计量的，切掉后半段再查表
+                        val key = stage.substringBefore(' ')
+                        val label = stageText[key] ?: "注入中"
+                        onTick?.invoke(
+                            progressOf(Stage.INJECT, 0.5f),
+                            "$label  ·  $stage",
+                        )
+                    }
                     val fastMs = (System.nanoTime() - tFast0) / 1_000_000
                     if (fast is FastInjector.Result.Injected) {
                         step(

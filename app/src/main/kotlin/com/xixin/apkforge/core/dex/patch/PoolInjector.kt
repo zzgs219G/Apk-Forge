@@ -102,6 +102,8 @@ internal object PoolInjector {
         dexBytes: ByteArray,
         ref: MethodRefRequest,
         insnPatch: InsnPatch? = null,
+        /** 每个阶段完成时回调一次阶段名（如 `5-types`），用于让 UI 的实时状态行动起来 */
+        onStage: ((String) -> Unit)? = null,
     ): Result {
         val src = DexBuffer(dexBytes)
         runCatching { validate(src) }.getOrElse {
@@ -117,6 +119,10 @@ internal object PoolInjector {
         val laps = ArrayList<Pair<String, Long>>(16)
         fun lap(name: String) {
             laps += name to (System.nanoTime() - t0) / 1_000_000
+            // 实时上报当前阶段，让 UI 的进度条上方那行文字动起来。
+            // 只靠返回时的 note，用户在那 1 秒里什么也看不到 ——
+            // 注入 1.1 秒时，进度条会从 0.81s 冻到 2.12s。
+            onStage?.invoke(name)
         }
 
         return try {

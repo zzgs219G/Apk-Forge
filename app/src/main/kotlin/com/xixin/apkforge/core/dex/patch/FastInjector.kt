@@ -65,7 +65,12 @@ object FastInjector {
      * @param dexBytes 目标 dex 的原始字节
      * @param spec 与 [DexCallInjector.inject] 完全相同的规格
      */
-    fun tryInject(dexBytes: ByteArray, spec: DexCallInjector.Spec): Result {
+    fun tryInject(
+        dexBytes: ByteArray,
+        spec: DexCallInjector.Spec,
+        /** 池注入各阶段完成时回调，用于 UI 显示「现在在做什么」 */
+        onStage: ((String) -> Unit)? = null,
+    ): Result {
         // ── 粗筛一：替换方法体会丢弃原指令 ──
         if (spec.replaceBody) {
             return Result.NotApplicable("替换方法体模式需要丢弃原指令，增量路径暂不支持")
@@ -155,6 +160,7 @@ object FastInjector {
                 methodSig = spec.methodSignature,
                 newInsns = encoded.toShortArray(),
             ),
+            onStage = onStage,
         )
         return when (patched) {
             is PoolInjector.Result.Ok -> Result.Injected(

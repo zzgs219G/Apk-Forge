@@ -9,10 +9,27 @@
 ```
 本地 APK dex 注入工具（Android 端）
 依赖只有 smali-dexlib2 3.0.10 + JUnit
-单测全部基于真实 APK，可离线跑（条数以 testDebugUnitTest 输出为准，不写死数字）
+单测全部基于真实 APK，**在 GitHub Actions 上跑**（本地跑会占满手机内存）
 4 种注入模式、批量注入、可自造弹窗载荷（payload/）
 无重签名、不处理加固包的业务逻辑、只支持 arm64-v8a
 ```
+
+**注入性能（28.5MB / 16722 类的 release dex，手机实测）**：
+
+```
+注入 1140ms  ·  全流程 4750ms
+（走 PoolInjector 增量路径；全量 DexPool 路径约 9~18 秒）
+```
+
+### 三个仓库 / 三个体系
+
+| 位置 | 用途 |
+|---|---|
+| `github.com/zzgs219G/Apk-Forge` | **主仓库**。CI 跑测试 + 打包，产物从 Actions Artifact 取 |
+| `cnb.cool/zzgs219/Apk-Forge` | 镜像，代码同步推送 |
+| `.github/workflows/test.yml` | push 即跑单测 |
+| `.github/workflows/build-apk.yml` | 手动触发打包，产出未签名 APK |
+
 
 ### 目录树（分层有严格语义，不要随意跨层）
 
@@ -29,11 +46,12 @@ com.xixin.apkforge
 │   ├── dex/InjectIdempotency    幂等保护：方法开头已是这条调用就跳过
 │   ├── dex/LifecyclePoints      注入点清单 + native 降级判定（★ 纯逻辑，可单测）
 │   ├── dex/InjectionMode        注入模式 + 落点规划器（★ 纯逻辑，可单测）
-│   ├── dex/DexCallInjector      dexlib2 插指令 / 建方法 / 替换方法体
+│   ├── dex/DexCallInjector      dexlib2 插指令 / 建方法 / 替换方法体（★ 全量路径，慢但保底）
 │   ├── dex/PayloadBaker         把配置烘焙进载荷 dex（★ 纯 JVM，可单测）
 │   ├── dex/SamplePayload        示例载荷常量（调用行 + asset 路径）
-│   ├── apk/ApkRepackager        zip 重打包（只替换 dex + 追加 payload + 保持对齐）
-│   └── apk/ApkInjectPipeline    流水线编排（Stage 权重 + Step 坐标）
+│   ├── dex/patch/               ★★★ 增量注入层（快路径），见 §10 专章
+│   ├── apk/ApkRepackager        zip 重打包（替换 dex + 追加 payload + 保对齐 + 字节级进度）
+│   └── apk/ApkInjectPipeline    流水线编排（Stage 权重 + Step 里程碑 + onTick 高频状态）
 
 ├── data/                        持久化与平台 IO（需要 Context）
 │   ├── ConfigStore              JSON 配置存储（调用行 + 载荷 + 模式 + 资产）
@@ -244,26 +262,53 @@ desugar 策略**，不会挡住「调用了设备上不存在的 API」——那
 
 ### 2.3 命令
 
-```bash
-# 构建
-sh gradlew assembleDebug
+> **⚠️ 不要在手机上跑全量测试。** 一次 4 分钟，263 秒里有 188 秒集中在
+> `InjectEndToEndTest` / `InjectIdempotencyTest` / `RepackArtifactTest`
+> 这三个类（每个用例都要拿 22MB 的 apk 做完整重打包），会把手机内存占满。
+>
+> **正确做法：push 到 GitHub，云端自动跑。**
+>
+> ```bash
+> git push github main                       # 触发 test.yml
+> gh run watch $(gh run list --limit 1 --json databaseId -q '.[0].databaseId') --exit-status
+> gh run download <id> -n 测试报告 -D ./tr    # 拉测试报告
+> ```
+>
+> 本机只在**改一小块逻辑**时跑对应目录，例如改增量注入跑：
+> `sh gradlew :app:testDebugUnitTest --offline --tests "com.xixin.apkforge.core.dex.patch.*"`
+> （约 1 分钟）
 
-# 全部测试（用本工程自己的 debug 产物当靶子）
-sh gradlew :app:testDebugUnitTest
+```bash
+# 构建（本地快速验证用）
+sh gradlew assembleDebug --offline
+
+# 只跑增量注入相关的测试（约 1 分钟，本地可以跑）
+sh gradlew :app:testDebugUnitTest --offline --tests "com.xixin.apkforge.core.dex.patch.*"
+
+# 编译并只看警告
+sh gradlew :app:compileDebugKotlin --offline 2>&1 | grep "^w:"
 
 # 重新生成弹窗载荷 dex（改了 payload/dialog/src 之后必须跑）
 # 自带两道门禁：占位符必须恰好出现 1 次、必须能用 android-21 编过
 sh payload/dialog/build.sh
 cp payload/dialog/out/PayloadDialog.dex app/src/main/assets/plugin/
 
-# 指定测试靶子 APK
-sh gradlew :app:testDebugUnitTest -Dapkforge.testApk=/path/to/target.apk
-
-# 只看编译警告
-sh gradlew :app:compileDebugKotlin --rerun-tasks 2>&1 | grep "^w:"
+# 云端打包（产出未签名 APK，从 Actions Artifact 取）
+gh workflow run build-apk.yml --repo zzgs219G/Apk-Forge \
+  -f build_type="全部(both)" -f version_code="0.5.0" -f run_tests="跳过测试"
+gh run download <id> -D dist
 ```
 
 > 注意：`gradlew` 在本机可能没有执行位，用 `sh gradlew` 而不是 `./gradlew`。
+
+### 2.4 改完增量注入层怎么验（必看）
+
+改 `core/dex/patch/` 下任何文件后，**结构校验通过不算修好**。
+必须走完三层，`AGENTS.md` §10.7 有完整说明：
+
+1. `dex2oat64 --compiler-filter=verify` → `rc=0`（只查结构，不执行代码）
+2. jadx 逐类 diff：除目标方法外应逐字一致
+3. 装机运行：签名 → 安装 → 启动 → 进程存活
 
 ---
 
@@ -433,6 +478,9 @@ false，导致改写后的方法没被替换进类。改为按「名字 + 签名
 |---|---|---|
 | 重签名 | 高 | 需解决 `apksig` 的 `java.util.stream` 依赖，或调系统 `apksigner`。**当前产物是完全未签名的**，任何设备都装不上 |
 | 加固包**脱壳** | 很高 | 现在的 `PackIntegrity` 只识别不脱壳（识别是为了把「找不到类」的误导换成真实原因），脱壳是另一个量级的工程 |
+| 重打包压缩改等级 1 | 低 | `classes2.dex` 12.5MB 压缩约 2 秒（占全流程 40%）。改成 `Deflater.BEST_SPEED` 能快一半，代价是包体大 5% 左右 |
+| 本地打包 release 缺资源 | 中 | Termux 上 `optimizeReleaseResources` 只写 metadata、不产出 `.ap_`，导致 `assembleRelease` 打出**没有 manifest 和 arsc 的灰包**。CI 上正常。本地需手工把 `linked-resources-binary-format-release.ap_` 补到 `optimized_processed_res/release/optimizeReleaseResources/resources-release-optimize.ap_` 才能出完整包 |
+| 7 项测试在 CI 跳过 | 低 | `MetadataIntegrityTest` / `MethodBodyIntegrityTest` / `DexStructuralIntegrityTest` / `MapOffsetValidityTest` / `Format3rcLayoutTest` / `InstructionStartSemanticsTest` / `TryBlockRemapperTest` 依赖 `o.apk`/`i.apk` 这对手工比对样本，CI 上没有。它们是人工排查工具，跳过属预期 |
 | SVG 外部化 | 低 | 动画路径从 Kotlin 硬编码改到 `res/raw/*.svg` |
 
 已完成（曾经列在这里）：
@@ -462,3 +510,131 @@ false，导致改写后的方法没被替换进类。改为按「名字 + 签名
 | 用 `String(dex, ISO_8859_1).contains(...)` 检查 dex 里的文本 | 字符串池是 MUTF-8，中文永远匹配不上，成功会被误判成失败 |
 | 把 native 方法不可插当成错误上报 | 用户只知道失败，不知道下一步换哪个点 |
 | 给进度条加「加速/补齐」 | 它就变成装饰品，而用户靠它判断卡住没有 |
+
+---
+
+## 10. 增量注入层（`core/dex/patch/`）—— 后续维护的核心地带
+
+这一层是为了把「注入 18 秒」压到「注入 1 秒」而写的。它绕开了 dexlib2 的
+`DexPool`（会重排整个池、重编码所有指令），代价是**必须自己保证 dex 布局合法**。
+
+### 10.1 为什么不能靠 `DexPool`
+
+`DexPool.writeTo` 把 8.5 万个字符串全部重新 interning、6 万个方法重新序列化。
+实测 28.5MB 的 dex 即使**什么都不改**也要 9~18 秒。
+
+而实际只需要新增 2~5 个池条目。所以增量路径换了个思路：
+
+```
+数据段（指令 / 注解 / 调试信息）→ 不做重编码，只搬字节
+索引段（6 张 id 表 + class_defs）→ 重建、重排、重映射
+```
+
+### 10.2 文件职责
+
+| 文件 | 职责 | 改动风险 |
+|---|---|---|
+| `FastInjector` | 门面：先试增量，不适用回退全量 | 低 |
+| `PoolInjector` | **核心**。池重排 + 段收集 + 排版 + 回填，900+ 行 | **极高** |
+| `DexSectionLayout` | 按 ART 规范段序拼接整份 dex | 高 |
+| `InstructionRefRemapper` | 指令里的池索引重映射 | 高 |
+| `AnnotationRemapper` | 注解四种结构的递归重写 | 中 |
+| `EncodedValueRemapper` | encoded_value 递归重映射（注解/静态值共用） | 中 |
+| `TryBlockRemapper` | try/catch 的异常类型重映射 | 中 |
+| `ClassDataRemapper` | class_data 重编码（uleb128 差分） | 中 |
+| `DebugInfoRemapper` | 调试信息状态机重写 | 中 |
+| `TypeListRemapper` | proto 参数表重映射 | 低 |
+| `DexPatcher` | 旧的「末尾追加」写法，**已被 PoolInjector 取代**，仅保留 `codeHeader` 等查询工具 | 低 |
+| `ByteSink` / `GrowableBuffer` / `DexBuffer` | 字节读写基础设施 | 低 |
+
+### 10.3 ART 的四条布局约束（写任何段代码前必读）
+
+来自 `libdexfile/dex/dex_file_verifier.cc`。**违反任何一条都是装机即崩**：
+
+1. **map 项按 `offset` 严格递增**（不是按 type）
+   → 否则 `Out of order map item: 3456c then 12c18`
+2. **物理布局必须与 map 顺序一致**，校验器用全局游标顺序推进
+   → 否则 `Section overlap or out-of-order map`
+3. **段与段之间只允许全零填充**
+   → 否则 `Non-zero padding 5e before section of type 8193`
+4. **同一 type 的所有 item 必须连续**（map 只记「起点 + 个数」）
+   → 否则 `List too large for insns size`
+
+外加一条容易忽略的：**`class_defs` 必须满足「父类/接口先于实现类」的偏序**，
+否则 `Invalid class definition ordering`。
+
+### 10.4 「段内偏移 + 1」哨兵（本层最容易踩的坑）
+
+dex 里大量字段用 `0` 表示「没有」，但**段内偏移 `0` 是合法的第一项**。
+两者冲突时，回填逻辑会 `if (v != 0)` 跳过，第一项永远填不进去 → 产生孤儿项。
+
+已统一改为「值 + 1」哨兵，`0` 仍表示没有。涉及：
+`class_data_off`、`annotations_off`、`interfaces_off`、`static_values_off`、
+`proto.parameters_off`、`code_item.debug_info_off`、注解链路的四种结构。
+
+**新增任何「可能为 0 的偏移字段」时，必须走同一套哨兵约定。**
+
+### 10.5 对齐规则（别一律 `align(4)`）
+
+| 段 | 对齐 |
+|---|---|
+| `string_data` / `debug_info` / `annotation_item` / `encoded_array` / `class_data` | **1 字节** |
+| 其余（`type_list` / `code_item` / `annotation_set` / `annotation_dir` 等） | 4 字节 |
+
+给 1 字节对齐的段加 4 对齐会在项之间插填充，而 ART **紧密遍历整段** →
+后续每项起点全偏，报 `Bad index for debug_info_item parameter_name`。
+那个报错里的两个数字跟真实数据毫无关系，极难反推。
+
+### 10.6 性能关键点（改动时勿退化）
+
+1. **只记录真正变化的索引**
+   28.5MB dex 有约 99 万条带池引用的指令，池重排后**只有 8.5% 的索引变了**。
+   为剩下 91.5% 建 `Patch` 对象要花 1.5 秒。`collect` 里用 `maps` 跳过未变的。
+2. **直接从指令字节读池索引，不要拼字符串查表**
+   `ref.parameterTypes.map { it.toString() }` 每条约分配 5 个临时对象。
+3. **`Format31c`（`const-string/jumbo`）的索引是 u32，不是 u16**
+   只读 2 字节会让所有 > 65535 的字符串常量指错。**这条 dex 校验查不出来，只有真机崩。**
+4. **避免大段复制**
+   各段用 `raw()` + 长度写入，而不是 `toByteArray()` 再写。
+
+### 10.7 验证必须三层，缺一层就会漏 bug
+
+```
+① 结构层  dex2oat64 --compiler-filter=verify → rc=0
+② 内容层  jadx 反编译原包与产物，逐类 diff（必须 sed 去掉 "loaded from" 注释）
+③ 运行层  签名 → 安装 → 启动 → 进程存活
+```
+
+**① 只查结构，一行代码都不执行。** 实测有 4 类 bug 它能放行：
+`invoke` 寄存器个数编码错、`insns_size` 少算、jumbo 索引截断、类定义偏序违规。
+
+② 的做法（`cat 从产物里 diff` 也行，但 jadx 更可读）：
+
+```bash
+jadx -d out_orig --no-res --no-imports -m fallback 原包.apk
+jadx -d out_inj  --no-res --no-imports -m fallback 产物.apk
+diff <(sed 's|loaded from.*||' out_orig/X.java) <(sed 's|loaded from.*||' out_inj/X.java)
+```
+
+**判据：除目标方法外，所有类应逐字一致。** 有差异就是内容错了。
+
+### 10.8 云端验证（不要在手机上跑全量测试）
+
+本地跑一次全量单测 4 分钟、占用大量内存。**push 到 GitHub 即自动跑**：
+
+```bash
+git push github main          # 触发 .github/workflows/test.yml
+gh run watch $(gh run list --limit 1 --json databaseId -q '.[0].databaseId')
+gh run download <id> -n 测试报告 -D ./tr
+```
+
+测试靶子就是**本 App 自己的产物**（`assembleRelease` 出的 release 包，
+`classes.dex` 29.9MB / 16722 类 / dex 039 / R8 混淆形态）。CI 会先构建靶子再测试。
+
+打包用 `build-apk.yml`（手动触发）：
+
+```bash
+gh workflow run build-apk.yml --repo zzgs219G/Apk-Forge \
+  -f build_type="全部(both)" -f version_code="0.5.0" -f run_tests="跳过测试"
+gh run download <id> -D dist
+```
