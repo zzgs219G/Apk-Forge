@@ -136,6 +136,24 @@ jobs:
             echo "❌ 示例 dex 魔数错误"; exit 1; }
 
       # ---------- 单元测试 ----------
+      # ⚠️ 必须先 assembleDebug 再跑测试。
+      # 本工程的测试**靶子是真实 APK**（`app-debug.apk`），
+      # 不是伪造的 dex 片段 —— 真实包的形态（多 dex、Compose 大方法、
+      # R8 折叠）是伪造样本覆盖不到的。
+      # 而 `DexPatcherTest` 找的就是 `app/build/outputs/apk/debug/app-debug.apk`，
+      # 这个文件只有跑完 assembleDebug 才存在。顺序反了测试会全部找不到靶子。
+      - name: 🏗️ 预构建测试靶子（app-debug.apk）
+        if: ${{ inputs.run_tests != '跳过测试' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p build-log
+          ./gradlew assembleDebug \
+            -Dorg.gradle.jvmargs="-Xmx4g" \
+            --stacktrace --console=plain \
+            2>&1 | tee build-log/prebuild.log
+          ls -la app/build/outputs/apk/debug/
+
       - name: 🧪 单元测试（真实 APK 端到端）
         if: ${{ inputs.run_tests != '跳过测试' }}
         shell: bash

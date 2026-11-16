@@ -1,0 +1,131 @@
+name: 单元测试
+
+# ============================================================
+#  ApkForge · 云端单元测试
+#
+#  【为什么单独一个 workflow】
+#  打包流水线是手动触发 / 打标签才跑的，周期长。而改注入逻辑时
+#  最需要的是「每次 push 自动告诉我有没有改坏」。
+#  所以这里只跑测试，不打包。
+#
+#  【为什么要先 assembleDebug】
+#  本工程的测试**靶子是真实 APK**（`app-debug.apk`），不是伪造的 dex 片段。
+#  真实包的形态（多 dex、Compose 大方法、R8 折叠）是伪造样本覆盖不到的。
+#  `DexPatcherTest` 找的就是那个文件，顺序反了会全部找不到靶子。
+#
+#  【哪些测试会 skip】
+#  `RealReleaseApkTest` 需要一个 52MB 的真实 release 包
+#  （`~/sample-release.apk`），它没有入库（.gitignore 忽略 *.apk）。
+#  CI 上这组会按 `assumeTrue` 跳过 —— 这是设计好的，不伪绿。
+# ============================================================
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/src/**"
+      - "app/build.gradle.kts"
+      - "gradle/**"
+      - ".github/workflows/test.yml"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 单元测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: 设置 Gradle 缓存
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          add-job-summary: on-failure
+
+      - name: 准备 Android SDK
+        run: sh .cnb/scripts/ensure-sdk.sh
+
+      # assets/sample/DemoDialog.dex 是构建产物，CI 上必须重新生成
+      - name: 生成示例 payload dex
+        run: |
+          set -e
+          SDK="${ANDROID_SDK:-${ANDROID_HOME:-$ANDROID_SDK_ROOT}}"
+          ANDROID_SDK="$SDK" bash tools/sample-payload/build.sh
+          head -c 4 app/src/main/assets/sample/DemoDialog.dex | grep -q "dex" || {
+            echo "❌ 示例 dex 魔数错误"; exit 1; }
+
+      # 测试靶子必须先构建出来
+      - name: 预构建测试靶子（app-debug.apk）
+        run: |
+          set -o pipefail
+          mkdir -p build-log
+          ./gradlew assembleDebug \
+            -Dorg.gradle.jvmargs="-Xmx4g" \
+            --stacktrace --console=plain \
+            2>&1 | tee build-log/prebuild.log
+
+      - name: 跑单元测试
+        run: |
+          set -o pipefail
+          mkdir -p build-log
+          ./gradlew testDebugUnitTest \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g" \
+            --stacktrace --console=plain \
+            2>&1 | tee build-log/test.log
+
+      - name: 汇总测试结果
+        if: always()
+        shell: bash
+        run: |
+          REPORT=app/build/test-results/testDebugUnitTest
+          {
+            echo "## 测试结果"
+            echo ""
+            echo "| 用例数 | 失败 | 跳过 |"
+            echo "|---|---|---|"
+            T=0; F=0; S=0
+            for f in "$REPORT"/*.xml; do
+              [ -e "$f" ] || continue
+              t=$(grep -o 'tests="[0-9]*"' "$f" | head -1 | grep -o '[0-9]*')
+              ff=$(grep -o 'failures="[0-9]*"' "$f" | head -1 | grep -o '[0-9]*')
+              ss=$(grep -o 'skipped="[0-9]*"' "$f" | head -1 | grep -o '[0-9]*')
+              T=$((T+${t:-0})); F=$((F+${ff:-0})); S=$((S+${ss:-0}))
+            done
+            echo "| $T | $F | $S |"
+            echo ""
+            if [ "$F" -gt 0 ]; then
+              echo "### 失败的用例"
+              grep -l 'failures="[1-9]' "$REPORT"/*.xml 2>/dev/null | while read -r f; do
+                grep -oE '<testcase name="[^"]*"' "$f" | sed 's/<testcase name="/- /; s/"$//'
+              done
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 测试报告
+          path: |
+            build-log/
+            app/build/reports/tests/
+            app/build/test-results/
+          if-no-files-found: warn
+          retention-days: 7
