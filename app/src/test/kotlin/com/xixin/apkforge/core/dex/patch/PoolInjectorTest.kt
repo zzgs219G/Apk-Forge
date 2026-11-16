@@ -24,10 +24,30 @@ import java.util.zip.ZipFile
  */
 class PoolInjectorTest {
 
+    /**
+     * 找测试靶子。
+     *
+     * 优先用 `sample-release.apk`（52MB 真实 release 包，形态最接近线上）；
+     * 找不到时回退到 `app-debug.apk`（22MB / 17 个 dex，本工程自己构建的）。
+     *
+     * 【为什么要回退】云端 CI 上 `*.apk` 被 .gitignore 排除，没有 release 样本。
+     * 如果直接 skip，`PoolInjector` 的核心测试在 CI 上一条都不跑 ——
+     * 那 CI 绿了也说明不了任何事。回退到 debug 包至少能覆盖
+     * 「池重排 / 索引重映射 / 产物可解析」这些主体逻辑。
+     */
     private fun locateReleaseApk(): File? {
         val p = System.getProperty("apkforge.releaseApk") ?: System.getenv("APKFORGE_RELEASE_APK")
         p?.let { val f = File(it); if (f.isFile) return f }
-        return File(System.getProperty("user.home"), "sample-release.apk").takeIf { it.isFile }
+        val home = System.getProperty("user.home")
+        if (home != null) {
+            val big = File(home, "sample-release.apk")
+            if (big.isFile) return big
+        }
+        return listOf(
+            File("build/outputs/apk/debug/app-debug.apk"),
+            File("app/build/outputs/apk/debug/app-debug.apk"),
+            File("../app/build/outputs/apk/debug/app-debug.apk"),
+        ).firstOrNull { it.isFile }
     }
 
     private fun dexBytes(apk: File, name: String): ByteArray =
