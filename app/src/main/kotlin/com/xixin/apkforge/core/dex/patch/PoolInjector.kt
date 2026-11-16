@@ -692,60 +692,28 @@ internal object PoolInjector {
             val dfForInsns = com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile
                 .fromInputStream(DexOpcodes.forBytes(dexBytes), dexBytes.inputStream())
 
-            val strLookup = HashMap<String, Int>(oldStrings.size * 2)
-            oldStrings.forEachIndexed { i, v -> strLookup.putIfAbsent(v, i) }
-            val typeLookupOld = HashMap<String, Int>(oldTypeStrings.size * 2)
-            oldTypeStrings.forEachIndexed { i, sIdx ->
-                typeLookupOld.putIfAbsent(oldStrings[sIdx], i)
-            }
-            val tLu0 = System.nanoTime()
-            val fieldLookup = HashMap<String, Int>(sec.fields.size * 2)
-            sec.fields.forEachIndexed { i, f ->
-                val c = oldStrings[sec.typeDescriptorIndices[f.classIdx]]
-                val n = oldStrings[f.nameIdx]
-                val t = oldStrings[sec.typeDescriptorIndices[f.typeIdx]]
-                fieldLookup.putIfAbsent("$c|$n|$t", i)
-            }
-            val tLu1 = System.nanoTime()
-            val protoLookup = HashMap<String, Int>(sec.protos.size * 2)
-            sec.protos.forEachIndexed { i, pr ->
-                val sig = "(" + pr.paramTypeIdx.joinToString("") {
-                    oldStrings[sec.typeDescriptorIndices[it]]
-                } + ")" + oldStrings[sec.typeDescriptorIndices[pr.returnTypeIdx]]
-                protoLookup.putIfAbsent(sig, i)
-            }
-            val tLu2 = System.nanoTime()
-            val tLu3 = System.nanoTime()
-            val methodLookupInsn = HashMap<String, Int>(90000)
-            run {
-                val mSize = src.u32AsInt(DexFormat.H_METHOD_IDS_SIZE, "mis")
-                val mOff = src.u32AsInt(DexFormat.H_METHOD_IDS_OFF, "mio")
-                for (i in 0 until mSize) {
-                    val o = mOff + i * 8
-                    val cIdx = src.u16(o)
-                    val pIdx = src.u16(o + 2)
-                    if (pIdx >= sec.protos.size || cIdx >= sec.typeDescriptorIndices.size) continue
-                    val nIdx = src.u32AsInt(o + 4, "n")
-                    val c = oldStrings[sec.typeDescriptorIndices[cIdx]]
-                    val n = oldStrings[nIdx]
-                    val pr = sec.protos[pIdx]
-                    val sig = "(" + pr.paramTypeIdx.joinToString("") {
-                        oldStrings[sec.typeDescriptorIndices[it]]
-                    } + ")" + oldStrings[sec.typeDescriptorIndices[pr.returnTypeIdx]]
-                    methodLookupInsn.putIfAbsent("$c|$n|$sig", i)
-                }
-            }
+            // 下面两个 lambda 已废弃（collect 改为直接读指令字节里的索引），
+            // 保留签名只是为了不改动 InstructionRefRemapper 的接口。
+
+            // ⚠️ 这里**不再构建 field/proto/method 三张查找表**。
+            //
+            // 那三张表的 key 是拼出来的字符串（`"类|名|类型"`、`"类|名|(参数)返回"`），
+            // 建表要遍历 2.5 万个字段 + 9642 个 proto + 5.9 万个方法，
+            // 手机上实测光是建表就花掉 1466ms。
+            //
+            // 它们存在的唯一理由是：`InstructionRefRemapper.collect` 需要从
+            // `ref.definingClass` / `ref.parameterTypes` 这些**对象**反查旧索引。
+            // 现在 collect 直接从指令字节里读索引（`input[start+2..3]`），
+            // 这三张表连同它们的 lambda 已完全无用。
 
             val insnPatches = InstructionRefRemapper.collect(
                 dfForInsns,
                 dexBytes,
-                stringIdx = { strLookup[it] ?: -1 },
-                typeIdx = { typeLookupOld[it] ?: -1 },
-                fieldIdx = { c, n, t -> fieldLookup["$c|$n|$t"] ?: -1 },
-                methodIdx = { c, n, pp, r ->
-                    methodLookupInsn["$c|$n|(" + pp.joinToString("") + ")" + r] ?: -1
-                },
-                protoIdx = { pp, r -> protoLookup["(" + pp.joinToString("") + ")" + r] ?: -1 },
+                stringIdx = { -1 },
+                typeIdx = { -1 },
+                fieldIdx = { _, _, _ -> -1 },
+                methodIdx = { _, _, _, _ -> -1 },
+                protoIdx = { _, _ -> -1 },
                 codeOffMap = movedCodeItems,
                 maps = evMaps,
             )
@@ -1108,22 +1076,26 @@ internal object PoolInjector {
             // 段序照抄 dexlib2 的 DexWriter.writeTo()：它写出的文件必然通过 ART 校验。
             // 六张 id 表在前，之后是 data 区（data_off 指向第一个 data 段），最后 map_list。
             val sections = listOf(
-                DexSectionLayout.Section(DexFormat.TYPE_STRING_ID_ITEM, mergedStrings.size, stringIdsBuf.size) { t -> t.bytes(stringIdsBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_TYPE_ID_ITEM, mergedTypeStringIdx.size, typeIdsBuf.size) { t -> t.bytes(typeIdsBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_PROTO_ID_ITEM, mergedProtos.size, protoIdsBuf.size) { t -> t.bytes(protoIdsBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_FIELD_ID_ITEM, fieldOrder.size, fieldIdsBuf.size) { t -> t.bytes(fieldIdsBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_METHOD_ID_ITEM, methodOrder.size, methodIdsBuf.size) { t -> t.bytes(methodIdsBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_CLASS_DEF_ITEM, classOrder.size, classDefsBuf.size) { t -> t.bytes(classDefsBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_STRING_DATA_ITEM, mergedStrings.size, stringDataBuf.size) { t -> t.bytes(stringDataBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_TYPE_LIST, typeListCount, typeListBuf.size) { t -> t.bytes(typeListBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_ENCODED_ARRAY_ITEM, staticValueArrays.size, encodedArrayBuf.size) { t -> t.bytes(encodedArrayBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_ITEM, annotationItemCount, annotationItemBuf.size) { t -> t.bytes(annotationItemBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_SET_ITEM, annotationSetCount, annotationSetBuf.size) { t -> t.bytes(annotationSetBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_SET_REF_LIST, annotationSetRefCount, annotationSetRefBuf.size) { t -> t.bytes(annotationSetRefBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATIONS_DIRECTORY_ITEM, newAnnotationsOffsets.size, annotationDirBuf.size) { t -> t.bytes(annotationDirBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_DEBUG_INFO_ITEM, debugInfoCache.size, debugInfoBuf.size) { t -> t.bytes(debugInfoBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_CODE_ITEM, codeItemsToBuild.size, codeItemBuf.size) { t -> t.bytes(codeItemBuf.toByteArray()) },
-                DexSectionLayout.Section(DexFormat.TYPE_CLASS_DATA_ITEM, newClassDataOffsets.size, classDataBuf.size) { t -> t.bytes(classDataBuf.toByteArray()) },
+                // ⚠️ 用 `raw()` + 长度直接写入，**不要** `toByteArray()`。
+                // `string_data` 和 `code_item` 各 15MB 级别，每段复制一次
+                // 就是两次 15MB 分配；手机上这些大对象会直接进老年代，
+                // 引发长时间 GC —— 实测同一份代码两次注入差了近 2 倍时间。
+                DexSectionLayout.Section(DexFormat.TYPE_STRING_ID_ITEM, mergedStrings.size, stringIdsBuf.size) { t -> t.bytes(stringIdsBuf.raw(), 0, stringIdsBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_TYPE_ID_ITEM, mergedTypeStringIdx.size, typeIdsBuf.size) { t -> t.bytes(typeIdsBuf.raw(), 0, typeIdsBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_PROTO_ID_ITEM, mergedProtos.size, protoIdsBuf.size) { t -> t.bytes(protoIdsBuf.raw(), 0, protoIdsBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_FIELD_ID_ITEM, fieldOrder.size, fieldIdsBuf.size) { t -> t.bytes(fieldIdsBuf.raw(), 0, fieldIdsBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_METHOD_ID_ITEM, methodOrder.size, methodIdsBuf.size) { t -> t.bytes(methodIdsBuf.raw(), 0, methodIdsBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_CLASS_DEF_ITEM, classOrder.size, classDefsBuf.size) { t -> t.bytes(classDefsBuf.raw(), 0, classDefsBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_STRING_DATA_ITEM, mergedStrings.size, stringDataBuf.size) { t -> t.bytes(stringDataBuf.raw(), 0, stringDataBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_TYPE_LIST, typeListCount, typeListBuf.size) { t -> t.bytes(typeListBuf.raw(), 0, typeListBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_ENCODED_ARRAY_ITEM, staticValueArrays.size, encodedArrayBuf.size) { t -> t.bytes(encodedArrayBuf.raw(), 0, encodedArrayBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_ITEM, annotationItemCount, annotationItemBuf.size) { t -> t.bytes(annotationItemBuf.raw(), 0, annotationItemBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_SET_ITEM, annotationSetCount, annotationSetBuf.size) { t -> t.bytes(annotationSetBuf.raw(), 0, annotationSetBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATION_SET_REF_LIST, annotationSetRefCount, annotationSetRefBuf.size) { t -> t.bytes(annotationSetRefBuf.raw(), 0, annotationSetRefBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_ANNOTATIONS_DIRECTORY_ITEM, newAnnotationsOffsets.size, annotationDirBuf.size) { t -> t.bytes(annotationDirBuf.raw(), 0, annotationDirBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_DEBUG_INFO_ITEM, debugInfoCache.size, debugInfoBuf.size) { t -> t.bytes(debugInfoBuf.raw(), 0, debugInfoBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_CODE_ITEM, codeItemsToBuild.size, codeItemBuf.size) { t -> t.bytes(codeItemBuf.raw(), 0, codeItemBuf.size) },
+                DexSectionLayout.Section(DexFormat.TYPE_CLASS_DATA_ITEM, newClassDataOffsets.size, classDataBuf.size) { t -> t.bytes(classDataBuf.raw(), 0, classDataBuf.size) },
             )
 
             val laid = DexSectionLayout.layout(DexFormat.HEADER_SIZE, dexBytes, sections)
@@ -1401,7 +1373,11 @@ internal object PoolInjector {
             out.patchU32(DexFormat.H_DATA_OFF, laid.dataOffset.toLong())
             out.patchU32(DexFormat.H_DATA_SIZE, laid.dataSize.toLong())
 
-            val result = out.toByteArray().copyOf(finalSize)
+            // ⚠️ 只要一次复制。写成 `toByteArray().copyOf(finalSize)` 会复制两次 30MB：
+            // 第一次 toByteArray 复制出完整长度，第二次 copyOf 再复制成 finalSize。
+            // 手机上两次 30MB 分配足以触发明显的 GC 停顿。
+            val raw = out.toByteArray()
+            val result = if (raw.size == finalSize) raw else raw.copyOf(finalSize)
             fixChecksums(result)
 
             Result.Ok(

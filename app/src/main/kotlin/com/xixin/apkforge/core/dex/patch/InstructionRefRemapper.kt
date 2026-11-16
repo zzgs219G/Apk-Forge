@@ -140,9 +140,22 @@ internal object InstructionRefRemapper {
                     // 9 万条指令下来就是几十万次字符串分配，实测光是这一步
                     // 就让 collect 花掉 1567ms。
                     //
-                    // 原始索引就在指令里，读两个字节的事，何必绕一圈。
+                    // 原始索引就在指令里，直接读字节，何必绕一圈。
+                    //
+                    // ⚠️ **31c（const-string/jumbo）的索引是 4 字节 u32**，不是 2 字节！
+                    // 只读低 16 位的话，凡是索引 > 65535 的字符串常量都会指错地方 ——
+                    // 实测 8.4 万字符串的 dex 上，`"minmax values must be non-negative"`
+                    // 变成了 `"minimumCapacity"`，`"fr)"` 变成 `"fr"`。
+                    // 这类错误 dex 结构完全合法（ART 校验 rc=0），
+                    // 但运行时 Compose 找不到 Navigator 直接崩。
                     val rawIdx: Int = when (insn.opcode.format) {
-                        com.android.tools.smali.dexlib2.Format.Format31c,
+                        com.android.tools.smali.dexlib2.Format.Format31c -> {
+                            val b0 = input[start + 2].toInt() and 0xFF
+                            val b1 = input[start + 3].toInt() and 0xFF
+                            val b2 = input[start + 4].toInt() and 0xFF
+                            val b3 = input[start + 5].toInt() and 0xFF
+                            b0 or (b1 shl 8) or (b2 shl 16) or (b3 shl 24)
+                        }
                         com.android.tools.smali.dexlib2.Format.Format21c,
                         com.android.tools.smali.dexlib2.Format.Format22c,
                         com.android.tools.smali.dexlib2.Format.Format35c,
