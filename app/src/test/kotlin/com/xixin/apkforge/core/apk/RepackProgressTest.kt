@@ -49,7 +49,8 @@ class RepackProgressTest {
         if (dexBytes.size < 512 * 1024) return
 
         val out = File.createTempFile("repack-progress", ".apk").apply { deleteOnExit() }
-        val ticks = ArrayList<Pair<Int, Int>>()   // (已写, 总字节)
+        // 按条目名分组：包里可能有多个大 dex，每个都会回调
+        val ticksByName = LinkedHashMap<String, MutableList<Pair<Int, Int>>>()
 
         ApkRepackager.repack(
             sourceApk = apk,
@@ -58,20 +59,30 @@ class RepackProgressTest {
             newDexBytes = dexBytes,
             payloadDexBytes = null,
             onEntry = { _, _, _ -> },
-            onBytes = { written, totalBytes, _ -> ticks += written to totalBytes },
+            onBytes = { written, totalBytes, name ->
+                ticksByName.getOrPut(name) { mutableListOf() } += written to totalBytes
+            },
         )
 
-        // 至少要有 3 次回调：0 之后、中途、写完。
-        // 只有 1 次说明整块写了，进度条会冻住。
+        // 挑一个真的有多次回调的条目来验证。
+        // 【为什么不只盯 targetDexName】它被替换成 newDexBytes 后未必要分块
+        // （取决于大小），而包里其它大 dex 同样会走分块路径。
+        // 这个测试要钉的是「分块机制生效」，不是「某个特定条目分块」。
+        val best = ticksByName.maxByOrNull { it.value.size }
+        val checkedName = best?.key ?: ""
+        val ticks: List<Pair<Int, Int>> = best?.value ?: emptyList()
+
+        // 至少要有 3 次回调：中途若干次 + 写完那次。
+        // 只有 1 次说明整块写出了，进度条会冻住。
         assertTrue(
-            "大条目 ${dexName}（${dexBytes.size} 字节）应产生多次字节进度回调，" +
-                "实际只有 ${ticks.size} 次 —— 说明又变回整块写出了，进度条会卡住",
+            "大条目（最大的是 $checkedName，共 ${ticks.size} 次回调）应产生多次字节进度回调。" +
+                "只有 ≤2 次说明又变回整块写出了，进度条会卡住",
             ticks.size >= 3,
         )
         // 必须是单调递增，且最后一次等于总长
         val totals = ticks.map { it.second }.distinct()
         assertTrue(
-            "同一条目的总字节数应始终一致，实际出现 ${totals.size} 种：$totals",
+            "同一条目（$checkedName）的总字节数应始终一致，实际出现 ${totals.size} 种：$totals",
             totals.size == 1,
         )
         assertTrue(
@@ -79,8 +90,8 @@ class RepackProgressTest {
             ticks.zipWithNext().all { (a, b) -> b.first >= a.first },
         )
         assertTrue(
-            "最后一次回调应等于总字节数 ${dexBytes.size}，实际 ${ticks.last().first}",
-            ticks.last().first == dexBytes.size,
+            "最后一次回调应等于总字节数 ${ticks.first().second}，实际 ${ticks.last().first}",
+            ticks.last().first == ticks.first().second,
         )
 
         out.delete()
