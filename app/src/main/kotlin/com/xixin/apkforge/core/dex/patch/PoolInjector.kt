@@ -668,6 +668,7 @@ internal object PoolInjector {
                 }
             }
             var annDirCount = 0
+            val tAnn0 = System.nanoTime()
             sec.classDefs.forEach { cd ->
                 if (cd.annotationsOff == 0L) return@forEach
                 val dirOff = cd.annotationsOff.toInt()
@@ -697,6 +698,7 @@ internal object PoolInjector {
             oldTypeStrings.forEachIndexed { i, sIdx ->
                 typeLookupOld.putIfAbsent(oldStrings[sIdx], i)
             }
+            val tLu0 = System.nanoTime()
             val fieldLookup = HashMap<String, Int>(sec.fields.size * 2)
             sec.fields.forEachIndexed { i, f ->
                 val c = oldStrings[sec.typeDescriptorIndices[f.classIdx]]
@@ -704,6 +706,7 @@ internal object PoolInjector {
                 val t = oldStrings[sec.typeDescriptorIndices[f.typeIdx]]
                 fieldLookup.putIfAbsent("$c|$n|$t", i)
             }
+            val tLu1 = System.nanoTime()
             val protoLookup = HashMap<String, Int>(sec.protos.size * 2)
             sec.protos.forEachIndexed { i, pr ->
                 val sig = "(" + pr.paramTypeIdx.joinToString("") {
@@ -711,6 +714,8 @@ internal object PoolInjector {
                 } + ")" + oldStrings[sec.typeDescriptorIndices[pr.returnTypeIdx]]
                 protoLookup.putIfAbsent(sig, i)
             }
+            val tLu2 = System.nanoTime()
+            val tLu3 = System.nanoTime()
             val methodLookupInsn = HashMap<String, Int>(90000)
             run {
                 val mSize = src.u32AsInt(DexFormat.H_METHOD_IDS_SIZE, "mis")
@@ -733,6 +738,7 @@ internal object PoolInjector {
 
             val insnPatches = InstructionRefRemapper.collect(
                 dfForInsns,
+                dexBytes,
                 stringIdx = { strLookup[it] ?: -1 },
                 typeIdx = { typeLookupOld[it] ?: -1 },
                 fieldIdx = { c, n, t -> fieldLookup["$c|$n|$t"] ?: -1 },
@@ -741,9 +747,15 @@ internal object PoolInjector {
                 },
                 protoIdx = { pp, r -> protoLookup["(" + pp.joinToString("") + ")" + r] ?: -1 },
                 codeOffMap = movedCodeItems,
+                maps = evMaps,
             )
             // 自检：有方法却一条都没收集到，说明定位失败（静默跳过是致命错误）
-            if (insnPatches.isEmpty() && sec.methods.isNotEmpty()) {
+            //
+            // ⚠️ 例外：池没有重排时（方法已在池里、没有新增条目），
+            // 所有索引本来就不变，`collect` 会全部跳过，此时 0 条是正确的。
+            // 判据是「本次是否新增了池条目」，而不是「有没有产生 patch」。
+            val poolChanged = newStringsToAdd.isNotEmpty() || newTypesFinal.isNotEmpty()
+            if (insnPatches.isEmpty() && poolChanged && sec.methods.isNotEmpty()) {
                 return Result.Failed(
                     "指令池引用收集失败（0 条），说明 instructionStart 定位不可用；" +
                         "若继续将会产出索引全错的 dex。请改用全量写入"

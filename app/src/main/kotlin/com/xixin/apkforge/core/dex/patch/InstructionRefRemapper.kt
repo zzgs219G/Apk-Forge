@@ -63,14 +63,41 @@ internal object InstructionRefRemapper {
      */
     fun collect(
         dexFile: com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile,
+        /**
+         * 原始 dex 字节。用来**直接从指令里读池索引**，不走 dexlib2 的
+         * `reference` 对象 —— 后者每次都要拼字符串，9 万条指令下来是几十万次分配。
+         */
+        input: ByteArray,
         stringIdx: (String) -> Int,
         typeIdx: (String) -> Int,
         fieldIdx: (String, String, String) -> Int,
         methodIdx: (String, String, List<String>, String) -> Int,
         protoIdx: (List<String>, String) -> Int,
         codeOffMap: Map<Int, Int> = emptyMap(),
+        /**
+         * 各类索引的新旧对照表。用来**跳过索引没变的指令**。
+         *
+         * 【为什么必须跳过】一个 28.5MB / 5.5 万方法的 dex 有 ~99 万条带池引用的
+         * 指令，而池重排后**只有 8.5% 的索引真的变了**（实测 84198 / 991953）。
+         * 为剩下 91.5% 建 `Patch` 对象、拼文件名字符串、存进 ArrayList，
+         * 在手机上要花掉一千多毫秒，纯属浪费。
+         */
+        maps: EncodedValueRemapper.Maps? = null,
     ): List<Patch> {
-        val out = ArrayList<Patch>()
+        val out = ArrayList<Patch>(64 * 1024)
+
+        /** 索引没变就不用记录；变了才建 Patch。 */
+        fun unchanged(kind: Kind, old: Int): Boolean {
+            if (maps == null) return false
+            val t = when (kind) {
+                Kind.STRING -> maps.stringMap
+                Kind.TYPE -> maps.typeMap
+                Kind.FIELD -> maps.fieldMap
+                Kind.METHOD -> maps.methodMap
+                Kind.PROTO -> maps.protoMap
+            }
+            return old < t.size && t[old] == old
+        }
 
         for (cls in dexFile.classes) {
             for (method in cls.methods) {
@@ -84,7 +111,8 @@ internal object InstructionRefRemapper {
                 val shift = if (newCodeOff != null) newCodeOff - oldCodeOff else 0
 
                 for (insn in impl.instructions) {
-                    val start = (insn as? DexBackedInstruction)?.instructionStart ?: continue
+                    val dbInsn = insn as? DexBackedInstruction ?: continue
+                    val start = dbInsn.instructionStart
                     val ref = (insn as? ReferenceInstruction)?.reference ?: continue
                     val base = start + shift
 
@@ -105,38 +133,67 @@ internal object InstructionRefRemapper {
                     // ⚠️ 用 base（已按搬移量修正）而不是 start
                     val idxOffset = base + 2
 
+                    // ⚠️ 直接从**原始字节**读索引，不用 dexlib2 的 reference 对象。
+                    //
+                    // 【为什么】`ref.parameterTypes.map { it.toString() }` 每次迭代都
+                    // 新建 List + 若干 String，然后拼成 `"类|名|(参数)返回"` 去查 HashMap。
+                    // 9 万条指令下来就是几十万次字符串分配，实测光是这一步
+                    // 就让 collect 花掉 1567ms。
+                    //
+                    // 原始索引就在指令里，读两个字节的事，何必绕一圈。
+                    val rawIdx: Int = when (insn.opcode.format) {
+                        com.android.tools.smali.dexlib2.Format.Format31c,
+                        com.android.tools.smali.dexlib2.Format.Format21c,
+                        com.android.tools.smali.dexlib2.Format.Format22c,
+                        com.android.tools.smali.dexlib2.Format.Format35c,
+                        com.android.tools.smali.dexlib2.Format.Format3rc,
+                        -> {
+                            val a = input[start + 2].toInt() and 0xFF
+                            val b = input[start + 3].toInt() and 0xFF
+                            a or (b shl 8)
+                        }
+                        com.android.tools.smali.dexlib2.Format.Format45cc,
+                        com.android.tools.smali.dexlib2.Format.Format4rcc,
+                        -> {
+                            val a = input[start + 2].toInt() and 0xFF
+                            val b = input[start + 3].toInt() and 0xFF
+                            a or (b shl 8)
+                        }
+                        else -> -1
+                    }
+
                     when (ref) {
                         is StringReference -> {
-                            val i = stringIdx(ref.string)
-                            // 31c（const-string/jumbo）是 3 字、索引占 u32；
-                            // 3rc 也是 3 字但不是字符串指令，用 isRangeFmt 排除。
-                            if (i >= 0) out += Patch(
-                                idxOffset, i, Kind.STRING,
+                            if (rawIdx >= 0 && !unchanged(Kind.STRING, rawIdx)) out += Patch(
+                                idxOffset, rawIdx, Kind.STRING,
                                 wide = insn.codeUnits == 3 && !isRangeFmt,
                                 ownerCodeOff = oldCodeOff,
                             )
                         }
                         is TypeReference -> {
-                            val i = typeIdx(ref.type)
-                            if (i >= 0) out += Patch(idxOffset, i, Kind.TYPE, ownerCodeOff = oldCodeOff)
+                            if (rawIdx >= 0 && !unchanged(Kind.TYPE, rawIdx)) {
+                                out += Patch(idxOffset, rawIdx, Kind.TYPE, ownerCodeOff = oldCodeOff)
+                            }
                         }
                         is FieldReference -> {
-                            val i = fieldIdx(ref.definingClass, ref.name, ref.type)
-                            if (i >= 0) out += Patch(idxOffset, i, Kind.FIELD, ownerCodeOff = oldCodeOff)
+                            if (rawIdx >= 0 && !unchanged(Kind.FIELD, rawIdx)) {
+                                out += Patch(idxOffset, rawIdx, Kind.FIELD, ownerCodeOff = oldCodeOff)
+                            }
                         }
                         is MethodReference -> {
-                            val i = methodIdx(
-                                ref.definingClass, ref.name,
-                                ref.parameterTypes.map { it.toString() }, ref.returnType,
-                            )
-                            if (i >= 0) out += Patch(idxOffset, i, Kind.METHOD, ownerCodeOff = oldCodeOff)
+                            if (rawIdx >= 0 && !unchanged(Kind.METHOD, rawIdx)) {
+                                out += Patch(idxOffset, rawIdx, Kind.METHOD, ownerCodeOff = oldCodeOff)
+                            }
                         }
                         is MethodProtoReference -> {
-                            val i = protoIdx(
-                                ref.parameterTypes.map { it.toString() }, ref.returnType,
-                            )
-                            // 45cc/4rcc 的 proto 索引固定在最后一字（+6）
-                            if (i >= 0) out += Patch(base + 6, i, Kind.PROTO, ownerCodeOff = oldCodeOff)
+                            val pIdx = run {
+                                val a = input[start + 6].toInt() and 0xFF
+                                val b = input[start + 7].toInt() and 0xFF
+                                a or (b shl 8)
+                            }
+                            if (pIdx >= 0 && !unchanged(Kind.PROTO, pIdx)) {
+                                out += Patch(base + 6, pIdx, Kind.PROTO, ownerCodeOff = oldCodeOff)
+                            }
                         }
                         else -> Unit
                     }
