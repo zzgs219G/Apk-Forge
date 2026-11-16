@@ -38,16 +38,19 @@ class PoolInjectorTest {
     private fun locateReleaseApk(): File? {
         val p = System.getProperty("apkforge.releaseApk") ?: System.getenv("APKFORGE_RELEASE_APK")
         p?.let { val f = File(it); if (f.isFile) return f }
-        val home = System.getProperty("user.home")
-        if (home != null) {
-            val big = File(home, "sample-release.apk")
-            if (big.isFile) return big
+        // 优先真实 release 包（52MB，最接近线上形态）。
+        // 找不到时回退到 app-debug.apk —— 云端 CI 上靠 Release 附件提供样本，
+        // 万一下载失败，回退到 debug 包至少能覆盖池重排的主体逻辑，
+        // 而不是让整组测试 skip（CI 绿了却一条核心测试没跑，等于没测）。
+        val candidates = buildList {
+            System.getProperty("user.home")?.let { add(File(it, "sample-release.apk")) }
+            add(File("sample-release.apk"))
+            add(File("../sample-release.apk"))
+            add(File("build/outputs/apk/debug/app-debug.apk"))
+            add(File("app/build/outputs/apk/debug/app-debug.apk"))
+            add(File("../app/build/outputs/apk/debug/app-debug.apk"))
         }
-        return listOf(
-            File("build/outputs/apk/debug/app-debug.apk"),
-            File("app/build/outputs/apk/debug/app-debug.apk"),
-            File("../app/build/outputs/apk/debug/app-debug.apk"),
-        ).firstOrNull { it.isFile }
+        return candidates.firstOrNull { it.isFile }
     }
 
     private fun dexBytes(apk: File, name: String): ByteArray =

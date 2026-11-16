@@ -30,8 +30,16 @@ class RealReleaseApkTest {
     private fun locateReleaseApk(): File? {
         val p = System.getProperty("apkforge.releaseApk") ?: System.getenv("APKFORGE_RELEASE_APK")
         p?.let { val f = File(it); if (f.isFile) return f }
-        val guess = File(System.getProperty("user.home"), "sample-release.apk")
-        return guess.takeIf { it.isFile }
+        // 依次找：home 目录、项目根、模块目录。
+        // Gradle 的 test 任务工作目录默认是模块目录（app/），
+        // 而 `user.home` 在本地 Termux 与 CI runner 上不是同一个地方，所以两边都查。
+        val candidates = buildList {
+            System.getProperty("user.home")?.let { add(File(it, "sample-release.apk")) }
+            add(File("sample-release.apk"))
+            add(File("app/sample-release.apk"))
+            add(File("../sample-release.apk"))
+        }
+        return candidates.firstOrNull { it.isFile }
     }
 
     /** 在指定 dex 里找「LAUNCHER 类同 dex 内的无参 static 方法」。 */

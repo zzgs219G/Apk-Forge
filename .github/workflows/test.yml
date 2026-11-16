@@ -62,6 +62,34 @@ jobs:
       - name: 准备 Android SDK
         run: sh .cnb/scripts/ensure-sdk.sh
 
+      # ---------- 测试样本 ----------
+      # `RealReleaseApkTest` / `PoolInjectorTest` 需要 52MB 的真实 release 包。
+      # `.gitignore` 排除了 `*.apk`（不该让仓库背上 50MB 历史），
+      # 所以放在 GitHub Release 上当附件，CI 按需下载。
+      #
+      # ⚠️ 下载失败不该让整个 CI 红：那只是少覆盖一个场景，
+      # 相关测试会用 `assumeTrue` 跳过。但要**明确打印**出来，
+      # 不能让「跳过」悄悄发生 —— 绿了却少跑关键测试是最坏的情况。
+      - name: 下载真实 APK 样本
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          echo "尝试从 Release 下载测试样本…"
+          # 放到**项目根**：Gradle test 任务的工作目录是模块目录（app/），
+          # 测试代码会依次查 `sample-release.apk` / `app/` / `../`，
+          # 项目根能命中 `../sample-release.apk`。
+          if gh release download test-fixtures-v1 \
+               --repo "${{ github.repository }}" \
+               --pattern "sample-release.apk" \
+               --dir . --clobber; then
+            ls -la sample-release.apk
+            echo "✅ 样本就绪，RealReleaseApkTest 会真跑"
+          else
+            echo "::warning::样本下载失败，RealReleaseApkTest / RealReleaseIncrementalTest 将被跳过"
+          fi
+
       # assets/sample/DemoDialog.dex 是构建产物，CI 上必须重新生成
       - name: 生成示例 payload dex
         run: |
