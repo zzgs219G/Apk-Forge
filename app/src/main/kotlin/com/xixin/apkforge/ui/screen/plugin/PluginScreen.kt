@@ -19,7 +19,6 @@ import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -153,7 +152,7 @@ fun PluginScreen(
                 Button(
                     onClick = { vm.export() },
                     enabled = state.canExport,
-                    shape = RoundedCornerShape(16.dp),
+                    shape = MaterialTheme.shapes.medium,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(52.dp),
@@ -183,7 +182,7 @@ fun PluginScreen(
 @Composable
 private fun PackCard(state: PluginUiState) {
     Card(
-        shape = RoundedCornerShape(20.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         elevation = CardDefaults.cardElevation(0.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -248,7 +247,7 @@ private fun PackLine(name: String, desc: String) {
 @Composable
 private fun ContentCard(state: PluginUiState, vm: PluginViewModel) {
     Card(
-        shape = RoundedCornerShape(20.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         elevation = CardDefaults.cardElevation(0.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -262,7 +261,7 @@ private fun ContentCard(state: PluginUiState, vm: PluginViewModel) {
                 onValueChange = vm::setTitle,
                 label = { Text("标题") },
                 singleLine = true,
-                shape = RoundedCornerShape(14.dp),
+                shape = MaterialTheme.shapes.medium,
                 modifier = Modifier.fillMaxWidth(),
             )
             Gap(8.dp)
@@ -299,9 +298,9 @@ private fun ColorField(label: String, value: String, onChange: (String) -> Unit)
     val parsed = remember(value) { parseHex(value) }
     Row(verticalAlignment = Alignment.CenterVertically) {
         val swatch = if (parsed != null) {
-            Modifier.background(Color(parsed), RoundedCornerShape(8.dp))
+            Modifier.background(Color(parsed), MaterialTheme.shapes.small)
         } else {
-            Modifier.background(MaterialTheme.colorScheme.surfaceContainerHighest, RoundedCornerShape(8.dp))
+            Modifier.background(MaterialTheme.colorScheme.surfaceContainerHighest, MaterialTheme.shapes.small)
         }
         Box(Modifier.size(28.dp).then(swatch))
         HGap(10.dp)
@@ -311,7 +310,7 @@ private fun ColorField(label: String, value: String, onChange: (String) -> Unit)
             label = { Text(label) },
             singleLine = true,
             isError = parsed == null && value.isNotBlank(),
-            shape = RoundedCornerShape(12.dp),
+            shape = MaterialTheme.shapes.small,
             modifier = Modifier.weight(1f),
         )
     }
@@ -329,7 +328,7 @@ private fun parseHex(v: String): Long? {
 private fun BehaviorCard(state: PluginUiState, vm: PluginViewModel) {
     val f = state.form
     Card(
-        shape = RoundedCornerShape(20.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         elevation = CardDefaults.cardElevation(0.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -384,7 +383,7 @@ private fun BehaviorCard(state: PluginUiState, vm: PluginViewModel) {
                     onValueChange = { vm.setSilentDays(it.filter(Char::isDigit).toIntOrNull() ?: 0) },
                     singleLine = true,
                     placeholder = { Text("关") },
-                    shape = RoundedCornerShape(12.dp),
+                    shape = MaterialTheme.shapes.small,
                     modifier = Modifier.size(width = 88.dp, height = 56.dp),
                 )
             }
@@ -426,7 +425,7 @@ private fun SwitchRow(
 @Composable
 private fun ButtonsCard(state: PluginUiState, vm: PluginViewModel) {
     Card(
-        shape = RoundedCornerShape(20.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         elevation = CardDefaults.cardElevation(0.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -454,7 +453,7 @@ private fun ButtonsCard(state: PluginUiState, vm: PluginViewModel) {
 @Composable
 private fun ButtonEditor(button: PluginPack.Button, onChange: (PluginPack.Button) -> Unit) {
     Surface(
-        shape = RoundedCornerShape(14.dp),
+        shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceContainerHighest,
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -487,7 +486,7 @@ private fun ButtonEditor(button: PluginPack.Button, onChange: (PluginPack.Button
                 label = { Text("文字") },
                 singleLine = true,
                 isError = button.text.isBlank(),
-                shape = RoundedCornerShape(12.dp),
+                shape = MaterialTheme.shapes.small,
                 modifier = Modifier.fillMaxWidth(),
             )
             Gap(8.dp)
@@ -505,7 +504,7 @@ private fun ButtonEditor(button: PluginPack.Button, onChange: (PluginPack.Button
                     label = { Text(if (button.action == "网址") "网址" else "QQ 号") },
                     singleLine = true,
                     isError = button.arg.isBlank(),
-                    shape = RoundedCornerShape(12.dp),
+                    shape = MaterialTheme.shapes.small,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -515,7 +514,7 @@ private fun ButtonEditor(button: PluginPack.Button, onChange: (PluginPack.Button
                 onValueChange = { onChange(button.copy(toast = it)) },
                 label = { Text("点击提示（可空）") },
                 singleLine = true,
-                shape = RoundedCornerShape(12.dp),
+                shape = MaterialTheme.shapes.small,
                 modifier = Modifier.fillMaxWidth(),
             )
             Gap(8.dp)
@@ -530,7 +529,7 @@ private fun ButtonEditor(button: PluginPack.Button, onChange: (PluginPack.Button
 private fun JsonCard(state: PluginUiState, onCopy: (String) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     Card(
-        shape = RoundedCornerShape(20.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         elevation = CardDefaults.cardElevation(0.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -555,7 +554,7 @@ private fun JsonCard(state: PluginUiState, onCopy: (String) -> Unit) {
             )
             Gap(8.dp)
             Surface(
-                shape = RoundedCornerShape(12.dp),
+                shape = MaterialTheme.shapes.small,
                 color = MaterialTheme.colorScheme.surfaceContainerLowest,
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -603,7 +602,7 @@ private fun Picker(
             readOnly = true,
             singleLine = true,
             label = { Text(label) },
-            shape = RoundedCornerShape(12.dp),
+            shape = MaterialTheme.shapes.small,
             modifier = Modifier
                 .fillMaxWidth()
                 .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, true),

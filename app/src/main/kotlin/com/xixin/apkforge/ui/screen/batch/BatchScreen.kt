@@ -21,7 +21,6 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Check
@@ -195,7 +194,7 @@ private fun ConfigPicker(
 ) {
     var expanded by remember { mutableStateOf(false) }
     Card(
-        shape = RoundedCornerShape(18.dp),
+        shape = MaterialTheme.shapes.medium,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
         elevation = CardDefaults.cardElevation(0.dp),
         modifier = Modifier.fillMaxWidth(),
@@ -224,7 +223,7 @@ private fun ConfigPicker(
                         onValueChange = {},
                         readOnly = true,
                         singleLine = true,
-                        shape = RoundedCornerShape(14.dp),
+                        shape = MaterialTheme.shapes.medium,
                         modifier = Modifier
                             .fillMaxWidth()
                             .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable, true),
@@ -269,7 +268,7 @@ private fun ConfigPicker(
 @Composable
 private fun ProgressBlock(state: BatchUiState) {
     Surface(
-        shape = RoundedCornerShape(18.dp),
+        shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -320,7 +319,7 @@ private fun ProgressBlock(state: BatchUiState) {
 @Composable
 private fun QueueRow(item: BatchItem, running: Boolean, onRemove: () -> Unit) {
     Surface(
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -422,7 +421,7 @@ private fun EmptyHint(onPick: () -> Unit) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Gap(16.dp)
-        Button(onClick = onPick, shape = RoundedCornerShape(14.dp)) {
+        Button(onClick = onPick, shape = MaterialTheme.shapes.medium) {
             Icon(Icons.Rounded.FolderOpen, null, Modifier.size(18.dp))
             HGap(6.dp)
             Text("选择目录")
@@ -448,7 +447,7 @@ private fun BottomBar(
             if (state.running) {
                 OutlinedButton(
                     onClick = onCancel,
-                    shape = RoundedCornerShape(14.dp),
+                    shape = MaterialTheme.shapes.medium,
                     modifier = Modifier
                         .weight(1f)
                         .height(50.dp),
@@ -461,14 +460,14 @@ private fun BottomBar(
                 if (state.items.isNotEmpty()) {
                     OutlinedButton(
                         onClick = onClear,
-                        shape = RoundedCornerShape(14.dp),
+                        shape = MaterialTheme.shapes.medium,
                         modifier = Modifier.height(50.dp),
                     ) { Text("清空") }
                 }
                 Button(
                     onClick = onStart,
                     enabled = state.items.isNotEmpty() && state.activeConfig != null,
-                    shape = RoundedCornerShape(14.dp),
+                    shape = MaterialTheme.shapes.medium,
                     modifier = Modifier
                         .weight(1f)
                         .height(50.dp),

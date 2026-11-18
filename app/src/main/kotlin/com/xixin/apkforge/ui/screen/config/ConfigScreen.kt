@@ -3,7 +3,7 @@ package com.xixin.apkforge.ui.screen.config
 import android.app.Activity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,16 +14,16 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -35,10 +35,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -50,23 +47,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.xixin.apkforge.core.dex.InjectionMode
+import com.xixin.apkforge.ui.lifted.components.select.ToolSegmentedOptions
 import com.xixin.apkforge.data.ConfigStore
 import com.xixin.apkforge.data.FilePicker
 import com.xixin.apkforge.feature.config.ConfigEditorState
 import com.xixin.apkforge.feature.config.ConfigViewModel
-import com.xixin.apkforge.ui.lifted.page.AppTopBar
-import com.xixin.apkforge.ui.lifted.Gap
-import com.xixin.apkforge.ui.lifted.SectionTitle
 import com.xixin.apkforge.ui.lifted.AppConstants
-import com.xixin.apkforge.ui.lifted.components.input.ToolSingleLineInput
+import com.xixin.apkforge.ui.lifted.Gap
+import com.xixin.apkforge.ui.lifted.HGap
+import com.xixin.apkforge.ui.lifted.SectionTitle
 import com.xixin.apkforge.ui.lifted.components.input.ToolInputField
+import com.xixin.apkforge.ui.lifted.components.input.ToolSingleLineInput
+import com.xixin.apkforge.ui.lifted.page.AppTopBar
 
 /**
  * 配置页。全部使用 M3 标准组件。
@@ -154,12 +153,12 @@ fun ConfigScreen(
                             }
                         },
                         enabled = state.canSave,
-                        shape = RoundedCornerShape(12.dp),
+                        shape = MaterialTheme.shapes.small,
                     ) { Text("保存") }
                 } else {
                     FilledTonalButton(
                         onClick = { vm.startNew(); showEditor = true },
-                        shape = RoundedCornerShape(12.dp),
+                        shape = MaterialTheme.shapes.small,
                     ) {
                         Icon(Icons.Filled.Add, contentDescription = null, Modifier.size(18.dp))
                         Spacer(Modifier.size(4.dp))
@@ -245,7 +244,7 @@ private fun ConfigCardItem(
     var menu by remember { mutableStateOf(false) }
 
     Card(
-        shape = RoundedCornerShape(20.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerLow
         ),
@@ -325,7 +324,8 @@ private fun ConfigCardItem(
 @Composable
 private fun InfoPill(text: String, warn: Boolean = false) {
     Surface(
-        shape = RoundedCornerShape(100.dp),
+        // 胶囊形 = 圆形：走 CircleShape，不写字面量（规范 §2.5 第 7 条）。
+        shape = CircleShape,
         color = if (warn) {
             MaterialTheme.colorScheme.tertiaryContainer
         } else {
@@ -409,16 +409,10 @@ private fun ConfigEditor(
         }
 
         item {
-            EditorCard("注入模式") {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    InjectionMode.entries.forEach { m ->
-                        ModeRow(
-                            mode = m,
-                            selected = m == state.mode,
-                            onSelect = { onMode(m) },
-                        )
-                    }
-                }
+            EditorCard("触发方式") {
+                // 4 个模式原来是 4 张同色同权的卡片，一个低频互斥选择占了整屏最大一块。
+                // 改成一行下拉：闭合态只显示当前值与一句后果说明，展开才列全部。
+                ModeSelector(mode = state.mode, onSelect = onMode)
                 Gap(8.dp)
                 Text(
                     "配置只决定「注入什么」。注到哪个类的哪个方法由包自己决定，" +
@@ -431,56 +425,51 @@ private fun ConfigEditor(
 
         item {
             EditorCard("Payload dex") {
-                OutlinedCard(
-                    onClick = onPickDex,
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.outlinedCardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
+                // 卡中卡改掉：这里原来在 EditorCard 内部又套一层 OutlinedCard
+                // 给「选 dex」这一件事造了第二个容器。现在就是卡内一行。
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(MaterialTheme.shapes.small)
+                        .clickable(onClick = onPickDex)
+                        .heightIn(min = 48.dp)
+                        .padding(horizontal = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Row(
-                        Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(
-                                state.dexFile?.name ?: "选择 dex",
-                                style = if (state.dexExists) {
-                                    MaterialTheme.typography.bodyMedium.copy(
-                                        fontFamily = FontFamily.Monospace
-                                    )
-                                } else {
-                                    MaterialTheme.typography.bodyMedium
-                                },
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+                    Icon(
+                        if (state.dexExists) Icons.Rounded.Check else Icons.Filled.Add,
+                        contentDescription = null,
+                        tint = if (state.dexExists) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    HGap(9.dp)
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            state.dexFile?.name ?: "选择 dex",
+                            style = MaterialTheme.typography.bodyMedium.copy(
+                                fontFamily = if (state.dexExists) FontFamily.Monospace
+                                else FontFamily.Default
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
                             if (state.dexExists) {
-                                Text(
-                                    "${state.dexFile!!.length() / 1024} KB",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
-                        if (state.dexPath != null) {
-                            TextButton(onClick = onClearDex) { Text("清除") }
-                        } else {
-                            Text(
-                                "选择",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary,
-                            )
+                                "${state.dexFile!!.length() / 1024} KB · 复制进私有目录"
+                            } else {
+                                "不追加载荷，只插调用"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    if (state.dexPath != null) {
+                        TextButton(onClick = onClearDex) {
+                            Text("清除", style = MaterialTheme.typography.labelMedium)
                         }
                     }
                 }
-                Gap(6.dp)
-                Text(
-                    "dex 会复制进 App 私有目录，与原始文件解耦",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
         }
 
@@ -495,7 +484,7 @@ private fun EditorCard(
     content: @Composable () -> Unit,
 ) {
     Card(
-        shape = RoundedCornerShape(20.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerLow
         ),
@@ -557,41 +546,44 @@ private fun ConfirmDialog(
 }
 
 /**
- * 注入模式的一行。
+ * 触发方式：卡内**就地折叠**，不用 DropdownMenu。
  *
- * 用「卡片行」而不是 FilterChip：模式带一句后果说明，芯片放不下第二行文字，
- * 用户只能靠点一下才知道自己选了什么——那等于把设计文档塞进试错流程。
+ * 【为什么改掉下拉】上一版是 `DropdownMenu` 浮层，用户原话「丑爆了」。根因不是配色，
+ * 是形态选错：popup 与页面不同源（自己的阴影、圆角、进出场），在一片卡片里
+ * 读起来像一块外挂补丁。只有 4 项、装得下，就该在原地展开。
+ *
+ * 【标签为什么是「触发方式」而不是「注入模式」】`InjectionMode` 描述的是
+ * 调用在宿主里**被触发几次、何时触发**，不是「用哪种手段注入」
+ * （dex 方法体 / AXML 清单 / so 层）。混称会让人以为这里有 AXML 注入可选。
  */
 @Composable
-private fun ModeRow(mode: InjectionMode, selected: Boolean, onSelect: () -> Unit) {
-    Surface(
-        onClick = onSelect,
-        shape = RoundedCornerShape(14.dp),
-        color = if (selected) {
-            MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
-        } else {
-            MaterialTheme.colorScheme.surfaceContainerHighest
-        },
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            RadioButton(selected = selected, onClick = onSelect)
-            Column(Modifier.weight(1f)) {
-                Text(
-                    mode.label,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (selected) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    mode.hint,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
+private fun ModeSelector(mode: InjectionMode, onSelect: (InjectionMode) -> Unit) {
+    // ── 就地分段，不弹层 ──
+    //
+    // 上一版是「点一行 → 弹 bottom sheet → 里面 4 个单选项」，再上一版是 DropdownMenu。
+    // 三次都是**用容器代替判断**：4 个短标签一屏装得下，弹出去只是多两步。
+    //
+    // 现在直接铺成 SegmentedButton（M3 对「2~5 个互斥短选项」的标准形态），
+    // 与注入配置页的同一字段保持完全一致——同一个概念在两个页面长得不一样，
+    // 用户会以为它们是两件事。
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Text(
+            "触发方式",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Gap(8.dp)
+        ToolSegmentedOptions(
+            options = InjectionMode.entries.map { it.short },
+            selectedIndex = InjectionMode.entries.indexOf(mode),
+            onSelect = { onSelect(InjectionMode.entries[it]) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Gap(6.dp)
+        Text(
+            mode.hint,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }

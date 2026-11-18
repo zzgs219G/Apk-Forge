@@ -6,11 +6,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,7 +18,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -27,22 +25,22 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.InstallMobile
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -58,18 +56,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.xixin.apkforge.core.dex.LifecyclePoints
 import com.xixin.apkforge.data.FilePicker
 import com.xixin.apkforge.data.OutputStore
 import com.xixin.apkforge.data.TaskStore
@@ -81,6 +72,7 @@ import com.xixin.apkforge.ui.lifted.Gap
 import com.xixin.apkforge.ui.lifted.HGap
 import com.xixin.apkforge.ui.lifted.page.AppTopBar
 import com.xixin.apkforge.ui.lifted.components.ApkIcon
+import com.xixin.apkforge.ui.lifted.components.state.AppEmptyState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -138,6 +130,38 @@ fun ConsoleScreen(
 
     fun pickApk() = apkPicker.launch(FilePicker.pickApkIntent(context))
 
+    // 记录动作：卡片 ⋮ 菜单里的五项。
+    //
+    // 【为什么判断放在这里而不是菜单项里】产物可能已经被用户移走/删掉。
+    // 把「文件还在不在」的判断留在同一处，菜单只是触发器——
+    // 否则五个入口各写一遍存在性检查，漏一个就会出现「点了没反应」。
+    fun installRecord(rec: TaskStore.Record) {
+        val f = rec.outputFile
+        if (f == null || !f.isFile) {
+            vm.showMessage("产物已不在 Download 里，可能被移动或删除")
+        } else if (!OutputStore.installPath(context, f)) {
+            vm.showMessage("没有可用的安装器")
+        }
+    }
+
+    fun locateRecord(rec: TaskStore.Record) {
+        val f = rec.outputFile
+        if (f == null || !f.isFile) {
+            vm.showMessage("产物已不在 Download 里")
+        } else if (!FilePicker.locateInMt(context, f)) {
+            vm.showMessage("未安装 MT 管理器，或用分享代替")
+        }
+    }
+
+    fun shareRecord(rec: TaskStore.Record) {
+        val f = rec.outputFile
+        if (f == null || !f.isFile) {
+            vm.showMessage("产物已不在 Download 里")
+        } else if (!OutputStore.sharePath(context, f)) {
+            vm.showMessage("分享失败")
+        }
+    }
+
     /** 底部栏那颗按钮的行为随状态走，全 App 只有这一处主入口。 */
     fun primary() {
         when {
@@ -181,6 +205,23 @@ fun ConsoleScreen(
                 },
             )
 
+            // ⚠️ TaskHeader 必须在 LazyColumn **外面**。
+            //
+            // 上一版把它作为 `item {}` 放进列表：记录一多，往下滑「当前任务」
+            // 就被滚出屏幕了。而它回答的是「我现在在操作哪个包、跑到哪一步」——
+            // 这个信息在浏览记录时恰恰最需要对照，滚走等于把它变成一次性提示。
+            // 记录列表是「历史」，当前任务不是历史的一部分，它不该跟着历史一起滚。
+            if (state.apkFile != null) {
+                TaskHeader(
+                    state = state,
+                    onOpenRun = onOpenRun,
+                    modifier = Modifier.padding(
+                        horizontal = AppConstants.SCREEN_EDGE_PADDING,
+                        vertical = 4.dp,
+                    ),
+                )
+            }
+
             LazyColumn(
                 state = listState,
                 modifier = Modifier.weight(1f),
@@ -191,18 +232,14 @@ fun ConsoleScreen(
                     // 底部留出悬浮按钮的空间，否则最后一条记录会被它压住
                     bottom = 96.dp,
                 ),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                item {
-                    AnchorCard(state = state, onOpenRun = onOpenRun)
-                }
-
                 if (state.records.isNotEmpty()) {
                     item {
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .padding(top = 8.dp),
+                                .padding(top = 12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
@@ -226,39 +263,55 @@ fun ConsoleScreen(
                     items(state.records, key = { it.id }) { record ->
                         RecordCard(
                             record = record,
+                            // 整卡点击 = 看这一跑的日志。动作收在右侧 ⋮ 里。
+                            onOpen = {
+                                vm.viewRecord(record)
+                                onOpenRun()
+                            },
                             onReuse = {
                                 vm.reuseRecord(record)
                                 onOpenSetup()
                             },
-                            onInstall = {
-                                val f = record.outputFile
-                                if (f == null || !f.isFile) {
-                                    vm.showMessage("产物已不在 Download 里，可能被移动或删除")
-                                } else if (!OutputStore.installPath(context, f)) {
-                                    vm.showMessage("没有可用的安装器")
-                                }
-                            },
-                            onLocate = {
-                                val f = record.outputFile
-                                if (f == null || !f.isFile) {
-                                    vm.showMessage("产物已不在 Download 里")
-                                } else if (!FilePicker.locateInMt(context, f)) {
-                                    vm.showMessage("未安装 MT 管理器，或用分享代替")
-                                }
-                            },
-                            onShare = {
-                                val f = record.outputFile
-                                if (f == null || !f.isFile) {
-                                    vm.showMessage("产物已不在 Download 里")
-                                } else if (!OutputStore.sharePath(context, f)) {
-                                    vm.showMessage("分享失败")
-                                }
-                            },
+                            onInstall = { installRecord(record) },
+                            onLocate = { locateRecord(record) },
+                            onShare = { shareRecord(record) },
                             onDelete = { vm.deleteRecord(record.id) },
                         )
                     }
-                } else {
-                    item { HintBlock() }
+                } else if (state.apkFile == null) {
+                    // 首次启动。只留一行事实说明，不铺三步指引、不铺卡片：
+                    // 空态要说三件事：这是什么、为什么空、现在能做什么。
+                    // 只写一行灰字会把「没做完」当成人设——见 AppEmptyState 头注释。
+                    item {
+                        AppEmptyState(
+                            title = "还没有注入任务",
+                            description = "选一个 APK，把调用写进它的生命周期。" +
+                                "产物会存到 Download/ApkForge。",
+                            action = {
+                                // 空态里也放一个入口：FAB 在右下角，第一次打开的人不一定会去看那里。
+                                // 这不是「第二个主操作」——它与 FAB 触发同一个 primary()，
+                                // 是同一动作的显式化，不是并列的第二个功能。
+                                FilledTonalButton(
+                                    onClick = ::pickApk,
+                                    shape = MaterialTheme.shapes.large,
+                                    contentPadding = PaddingValues(
+                                        horizontal = 22.dp, vertical = 14.dp
+                                    ),
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.FolderOpen,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    HGap(8.dp)
+                                    Text(
+                                        "选择 APK",
+                                        style = MaterialTheme.typography.labelLarge,
+                                    )
+                                }
+                            },
+                        )
+                    }
                 }
             }
         }
@@ -270,7 +323,7 @@ fun ConsoleScreen(
         //    上一版贴底栏漏了这句，运行时叠到顶栏上——就是「按钮飞到顶上」的来源。
         ExtendedFloatingActionButton(
             onClick = ::primary,
-            shape = RoundedCornerShape(20.dp),
+            shape = MaterialTheme.shapes.large,
             containerColor = MaterialTheme.colorScheme.primary,
             contentColor = MaterialTheme.colorScheme.onPrimary,
             icon = {
@@ -301,7 +354,7 @@ fun ConsoleScreen(
                 .padding(bottom = 88.dp, start = 16.dp, end = 16.dp),
         ) {
             Surface(
-                shape = RoundedCornerShape(16.dp),
+                shape = MaterialTheme.shapes.medium,
                 color = MaterialTheme.colorScheme.inverseSurface,
                 shadowElevation = 6.dp,
             ) {
@@ -322,6 +375,7 @@ fun ConsoleScreen(
             }
         }
     }
+
 }
 
 private fun primaryLabel(state: ConsoleUiState): String = when {
@@ -331,237 +385,101 @@ private fun primaryLabel(state: ConsoleUiState): String = when {
     else -> "继续配置"
 }
 
-// ══════════════════════ 锚点卡 ══════════════════════
+// ══════════════════════ 当前任务 ══════════════════════
 
 /**
- * 当前任务卡。
+ * 当前任务头。
  *
- * 【标签的含义】卡上两枚标签是**这条任务的身份**：
- *   ① 配置（注入什么：调用行 + payload dex）
- *   ② 签名（产物怎么签）——目前是「未签名」占位，
- *      因为它迟早要占这个位置，提前留好位置比将来挤进来更省事。
- * 注入点不是标签：它由系统自动算出来，把它摆在同等位置会让用户以为需要关心。
+ * 【为什么不再是卡片】上一版这里是一张 28dp 圆角的大卡：56dp 图标 + 「当前任务」
+ * 小标题 + 应用名 + 包名 + 文件名 + 两枚标签 + 一行落在哪个方法 + 结果条。
+ * 一屏之内它是最重的一块，但它承载的信息只有「哪个包」和「跑到哪一步了」——
+ * 而这些在下一次点击后就会被注入配置页 / 运行页接管。
+ *
+ * 现在压成**两行文字 + 一个状态点**：图标、应用名、状态在第一行，
+ * 包名与配置名合并在第二行。不再有卡、不再有标签、不再单独一行解释注入点
+ * （那是注入配置页的事，控制台不必复述）。
+ *
+ * 唯一保留的附加块是「上次注入结果」——它是对**下一步该点哪**有直接影响的信息
+ * （成功 → 去看产物，失败 → 去看日志），所以给一行，仍然不做卡片。
+ *
+ * ## 为什么在 LazyColumn 外面
+ *
+ * 见调用处注释：它是「现在」，不是「历史」。记录列表可以滚，当前任务不该跟着滚走。
  */
 @Composable
-private fun AnchorCard(
+private fun TaskHeader(
     state: ConsoleUiState,
     onOpenRun: () -> Unit,
-) {
-    val hasApk = state.apkFile != null
-
-    Card(
-        shape = RoundedCornerShape(28.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
-        ),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(18.dp)) {
-            if (!hasApk) {
-                EmptyAnchor()
-                return@Column
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                ApkIcon(
-                    icon = state.apkIcon,
-                    fallback = state.apkLabel.ifBlank { state.apkName },
-                    size = 56.dp,
-                )
-                HGap(14.dp)
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        "当前任务",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Gap(2.dp)
-                    Text(
-                        state.apkLabel.ifBlank { state.apkName },
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Gap(2.dp)
-                    Text(
-                        state.packageName ?: "包名未知",
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontFamily = FontFamily.Monospace
-                        ),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                StatusDot(state.status)
-            }
-
-            Gap(10.dp)
-            Text(
-                // 文件名单独一行：它是「物理上动的是哪个文件」，与手机里那个 APK 对得上号
-                listOfNotNull(
-                    state.apkName,
-                    state.apkVersion?.let { "v$it" },
-                    "${state.apkSize / 1048576} MB",
-                ).joinToString(" · "),
-                style = MaterialTheme.typography.labelSmall.copy(
-                    fontFamily = FontFamily.Monospace
-                ),
-                color = MaterialTheme.colorScheme.outline,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-
-            Gap(14.dp)
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Tag(
-                    text = state.activeConfig?.name ?: "未套配置",
-                    warn = state.activeConfig == null,
-                )
-                Tag(text = "未签名", muted = true)
-            }
-
-            Gap(10.dp)
-            Text(
-                buildString {
-                    append(state.mode.label)
-                    append(" → ")
-                    append(if (state.autoTarget) "自动 · " else "")
-                    append(state.targetMethod.ifBlank { "待解析" })
-                    if (state.plannedTargets > 1) append(" 等 ${state.plannedTargets} 个方法")
-                    if (state.targetStatus == LifecyclePoints.Status.MISSING) append("（将创建）")
-                },
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-
-            if (state.result != null) {
-                Gap(8.dp)
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = if (state.result.ok) {
-                        MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
-                    } else {
-                        MaterialTheme.colorScheme.error.copy(alpha = 0.12f)
-                    },
-                ) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            if (state.result.ok) "上次注入成功" else "上次注入失败",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = if (state.result.ok) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.error,
-                            modifier = Modifier.weight(1f),
-                        )
-                        TextButton(onClick = onOpenRun) {
-                            Text("看结果", style = MaterialTheme.typography.labelMedium)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun EmptyAnchor() {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        ForgeGlyph(
-            modifier = Modifier.size(64.dp),
-            color = MaterialTheme.colorScheme.primary,
-        )
-        HGap(16.dp)
-        Column(Modifier.weight(1f)) {
-            Text(
-                "本地 dex 注入",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Gap(4.dp)
-            Text(
-                "选一个 APK，\n把调用塞进它的生命周期",
-                style = MaterialTheme.typography.headlineSmall,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            Gap(6.dp)
-            Text(
-                "选包 → 选配置 → 注入。产物进 Download/ApkForge。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-    Gap(12.dp)
-    Text(
-        "点右下角按钮选 APK —— 全屏只有这一个主操作，不用找",
-        style = MaterialTheme.typography.labelMedium,
-        color = MaterialTheme.colorScheme.primary,
-    )
-}
-
-/**
- * 品牌图形：一枚六边形 + 穿透它的注入箭头。
- *
- * 与运行页的动画同源（`ui/anim` 的六边形），尺寸小、只描边，不做循环动画——
- * 首页需要一个**静止的标记**当视觉锚点，动起来反而抢走按钮的注意力。
- */
-@Composable
-fun ForgeGlyph(
     modifier: Modifier = Modifier,
-    color: Color,
-    active: Boolean = false,
 ) {
-    val alpha by animateFloatAsState(
-        targetValue = if (active) 0.55f else 1f,
-        label = "glyphAlpha",
-    )
-    Canvas(modifier) {
-        val w = size.minDimension
-        val cx = size.width / 2f
-        val cy = size.height / 2f
-        val r = w * 0.42f
-        val path = Path()
-        repeat(6) { i ->
-            val a = Math.toRadians((-90 + i * 60).toDouble())
-            val x = cx + (r * Math.cos(a)).toFloat()
-            val y = cy + (r * Math.sin(a)).toFloat()
-            if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+    Column(modifier.padding(top = 4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            ApkIcon(
+                icon = state.apkIcon,
+                fallback = state.apkLabel.ifBlank { state.apkName },
+                size = 36.dp,
+            )
+            HGap(11.dp)
+            Column(Modifier.weight(1f)) {
+                Text(
+                    state.apkLabel.ifBlank { state.apkName },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Gap(1.dp)
+                Text(
+                    // 包名 + 配置名：前者认包，后者说明「这次插的是哪一套」。
+                    // 文件名与版本号不在这里：需要找文件时记录卡里有。
+                    listOfNotNull(
+                        state.packageName,
+                        state.activeConfig?.name ?: "未套配置",
+                    ).joinToString(" · "),
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            HGap(8.dp)
+            StatusDot(state.status)
         }
-        path.close()
-        drawPath(
-            path = path,
-            color = color.copy(alpha = 0.18f * alpha),
-            style = Stroke(width = w * 0.05f),
-        )
-        val arrow = Path().apply {
-            moveTo(cx - r * 0.62f, cy - r * 0.62f)
-            lineTo(cx + r * 0.18f, cy + r * 0.18f)
-            moveTo(cx + r * 0.18f, cy - r * 0.12f)
-            lineTo(cx + r * 0.18f, cy + r * 0.18f)
-            lineTo(cx - r * 0.12f, cy + r * 0.18f)
+
+        if (state.result != null) {
+            val ok = state.result.ok
+            val tone = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+            Gap(8.dp)
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(MaterialTheme.shapes.small)
+                    .clickable(onClick = onOpenRun)
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(tone)
+                )
+                HGap(8.dp)
+                Text(
+                    if (ok) "上次注入成功" else "上次注入失败",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = tone,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "看结果",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         }
-        drawPath(
-            path = arrow,
-            color = color.copy(alpha = alpha),
-            style = Stroke(width = w * 0.06f, cap = StrokeCap.Round, join = StrokeJoin.Round),
-        )
-        drawCircle(
-            color = color.copy(alpha = 0.9f * alpha),
-            radius = w * 0.035f,
-            center = Offset(cx + r * 0.55f, cy + r * 0.55f),
-        )
-        drawCircle(
-            color = color.copy(alpha = 0.35f * alpha),
-            radius = w * 0.07f,
-            center = Offset(cx + r * 0.55f, cy + r * 0.55f),
-        )
     }
 }
 
@@ -585,31 +503,6 @@ private fun StatusDot(status: ConsoleStatus) {
     }
 }
 
-@Composable
-private fun Tag(text: String, warn: Boolean = false, muted: Boolean = false) {
-    Surface(
-        shape = RoundedCornerShape(100.dp),
-        color = when {
-            warn -> MaterialTheme.colorScheme.error.copy(alpha = 0.14f)
-            muted -> MaterialTheme.colorScheme.surfaceContainerHighest
-            else -> MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
-        },
-    ) {
-        Text(
-            text,
-            style = MaterialTheme.typography.labelMedium,
-            color = when {
-                warn -> MaterialTheme.colorScheme.error
-                muted -> MaterialTheme.colorScheme.onSurfaceVariant
-                else -> MaterialTheme.colorScheme.primary
-            },
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
 // ══════════════════════ 记录卡 ══════════════════════
 
 /**
@@ -624,13 +517,13 @@ private fun Tag(text: String, warn: Boolean = false, muted: Boolean = false) {
 @Composable
 private fun RecordCard(
     record: TaskStore.Record,
+    onOpen: () -> Unit,
     onReuse: () -> Unit,
     onInstall: () -> Unit,
     onLocate: () -> Unit,
     onShare: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    var menu by remember { mutableStateOf(false) }
     val context = LocalContext.current
     // 图标要开整个 zip 读资源，**不能**在组合期同步做：
     // 列表滚动时每帧调一次会把主线程钉住，表现是「滑到记录区就掉帧」。
@@ -645,10 +538,17 @@ private fun RecordCard(
             }
         }
     }
+    var menu by remember { mutableStateOf(false) }
 
+    // 整卡点击 = **看这一跑的日志**。
+    //
+    // 上一版这里是「打开详情弹窗」：弹窗里塞了配置/注入点/时间/两条路径，
+    // 加五个图标动作。后来发现整卡的意图根本不需要一个中间层——
+    // 用户点记录，要的是「这次跑成什么样」，那就是运行页本身。
+    // 弹窗也顺带消失：它的信息并进了日志页头部，动作并进了右侧菜单。
     Card(
-        onClick = onReuse,
-        shape = RoundedCornerShape(20.dp),
+        onClick = onOpen,
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainerLow
         ),
@@ -656,7 +556,7 @@ private fun RecordCard(
         modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
-            Modifier.padding(start = 14.dp, end = 6.dp, top = 12.dp, bottom = 12.dp),
+            Modifier.padding(start = 14.dp, end = 4.dp, top = 12.dp, bottom = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             ApkIcon(icon = icon, fallback = record.title, size = 40.dp)
@@ -708,34 +608,32 @@ private fun RecordCard(
                     Text(
                         "产物已删除",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
+                        color = MaterialTheme.colorScheme.error,
                     )
                 }
             }
 
+            // 卡片自己的动作菜单。与顶栏的 `⋮` 是同一个组件（DropdownMenu），
+            // 不是新造的一套：点开的位置贴着触发它的那张卡片，语义正确。
             Box {
                 IconButton(onClick = { menu = true }) {
                     Icon(
                         Icons.Rounded.MoreVert,
-                        contentDescription = "更多",
+                        contentDescription = "记录操作",
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    MenuRow("换配置再注入", Icons.Rounded.Refresh) {
-                        menu = false; onReuse()
-                    }
-                    MenuRow("安装产物", Icons.Rounded.InstallMobile) {
-                        menu = false; onInstall()
-                    }
-                    MenuRow("MT 定位", Icons.Rounded.FolderOpen) {
-                        menu = false; onLocate()
-                    }
-                    MenuRow("分享产物", Icons.Rounded.Share) {
-                        menu = false; onShare()
-                    }
+                    MenuRow("重跑一次", Icons.Rounded.Refresh) { menu = false; onReuse() }
+                    MenuRow("安装产物", Icons.Rounded.InstallMobile) { menu = false; onInstall() }
+                    MenuRow("MT 定位", Icons.Rounded.FolderOpen) { menu = false; onLocate() }
+                    MenuRow("分享产物", Icons.Rounded.Share) { menu = false; onShare() }
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                    )
                     MenuRow("删除记录", Icons.Rounded.Delete, danger = true) {
-                        menu = false; onDelete()
+                        menu = false
+                        onDelete()
                     }
                 }
             }
@@ -769,54 +667,6 @@ private fun MenuRow(
         },
         onClick = onClick,
     )
-}
-
-@Composable
-private fun HintBlock() {
-    Surface(
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            Text(
-                "三步就够",
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Gap(10.dp)
-            StepLine("1", "选 APK", "自动读出 LAUNCHER Activity 与它已有的方法")
-            StepLine("2", "选配置", "配置 = 调用行 + payload dex；没有就现场建一套")
-            StepLine("3", "注入", "跑完自动存进 Download/ApkForge，并留一条记录")
-        }
-    }
-}
-
-@Composable
-private fun StepLine(no: String, title: String, detail: String) {
-    Row(Modifier.padding(vertical = 4.dp)) {
-        Surface(
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
-        ) {
-            Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) {
-                Text(
-                    no,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-        }
-        HGap(10.dp)
-        Column {
-            Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-            Text(
-                detail,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
 }
 
 /** 相对时间。列表只是给人扫一眼，超过一周就给日期。 */

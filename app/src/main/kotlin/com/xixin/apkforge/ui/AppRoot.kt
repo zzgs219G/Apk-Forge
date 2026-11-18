@@ -1,6 +1,7 @@
 package com.xixin.apkforge.ui
 
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -21,6 +22,7 @@ import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -121,6 +123,19 @@ fun AppRoot(
     val backStack by nav.currentBackStackEntryAsState()
     val current = AppDest.of(backStack?.destination?.route)
 
+    // NavHost 的四个 transition lambda 是非 @Composable 的，读不了 MaterialTheme，
+    // 必须先在这里把 motionScheme 的规格取好（见 NavHost 处注释）。
+    // ⚠️ 必须写明泛型：motionScheme 的 spec 函数是 <T> 泛型，直接 val 赋值没有
+    //    期望类型可推，会报「Cannot infer type for type parameter T」。
+    // ⚠️ 位移的泛型是 IntOffset（slideInHorizontally 的规格类型），不是 Float——
+    //    写成 FiniteAnimationSpec<Float> 会报 "actual type is FiniteAnimationSpec<Float>,
+    //    but FiniteAnimationSpec<IntOffset> was expected"。
+    val motionScheme = MaterialTheme.motionScheme
+    val spatialEnter: FiniteAnimationSpec<IntOffset> = motionScheme.defaultSpatialSpec()
+    val spatialExit: FiniteAnimationSpec<IntOffset> = motionScheme.fastSpatialSpec()
+    val effectsEnter: FiniteAnimationSpec<Float> = motionScheme.defaultEffectsSpec()
+    val effectsExit: FiniteAnimationSpec<Float> = motionScheme.fastEffectsSpec()
+
     fun go(dest: AppDest) {
         if (dest.route == backStack?.destination?.route) return
         nav.navigate(dest.route) {
@@ -172,17 +187,25 @@ fun AppRoot(
         NavHost(
             navController = nav,
             startDestination = AppDest.CONSOLE.route,
+            // ⚠️ 转场必须走 motionScheme 语义槽，不能手填 tween(280)：
+            // 这四个 lambda 是**非 @Composable** 的，读不了 MaterialTheme，
+            // 所以 spec 先在下面 hoist 出来。换 MotionScheme 时这里会自动跟着变，
+            // 手填数字则永远不会——那正是「页面切换像 2016」的来源。
+            //
+            // 位移幅度取 1/10 与 1/20：整屏滑动的距离，1/10 是「下钻」（新页面从右侧
+            // 推入一小段，暗示层级更深），1/20 是「退出」（旧页面向左让开一点点，
+            // 不抢新页面的注意力）。这是 M3 官方 container transform 的比例。
             enterTransition = {
-                slideInHorizontally(tween(280)) { it / 10 } + fadeIn(tween(280))
+                slideInHorizontally(spatialEnter) { it / 10 } + fadeIn(effectsEnter)
             },
             exitTransition = {
-                slideOutHorizontally(tween(220)) { -it / 20 } + fadeOut(tween(200))
+                slideOutHorizontally(spatialExit) { -it / 20 } + fadeOut(effectsExit)
             },
             popEnterTransition = {
-                slideInHorizontally(tween(280)) { -it / 10 } + fadeIn(tween(280))
+                slideInHorizontally(spatialEnter) { -it / 10 } + fadeIn(effectsEnter)
             },
             popExitTransition = {
-                slideOutHorizontally(tween(220)) { it / 20 } + fadeOut(tween(200))
+                slideOutHorizontally(spatialExit) { it / 20 } + fadeOut(effectsExit)
             },
         ) {
             composable(AppDest.CONSOLE.route) {
@@ -216,7 +239,13 @@ fun AppRoot(
             }
             composable(AppDest.RUN.route) {
                 // 返回走「上一页」：跑完想改配置再跑一次，是最常见的下一步
-                RunScreen(vm = console, onBack = ::up, onExit = ::back)
+                RunScreen(
+                    vm = console,
+                    // 离开运行页必须清掉「回看」状态：否则下次从控制台正常进来，
+                    // 顶部还挂着上一条历史的包名与时间。
+                    onBack = { console.clearViewing(); up() },
+                    onExit = { console.clearViewing(); back() },
+                )
             }
             composable(AppDest.CONFIG.route) {
                 ConfigScreen(
