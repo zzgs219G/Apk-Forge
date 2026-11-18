@@ -1,18 +1,11 @@
 package com.xixin.apkforge.ui.screen.run
 
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -20,25 +13,18 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.ContentCopy
@@ -46,8 +32,6 @@ import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.InstallMobile
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Share
-import androidx.compose.material.icons.rounded.UnfoldLess
-import androidx.compose.material.icons.rounded.UnfoldMore
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -62,14 +46,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.graphicsLayer
@@ -78,16 +60,19 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.xixin.apkforge.core.apk.ApkInjectPipeline
 import com.xixin.apkforge.data.FilePicker
 import com.xixin.apkforge.data.OutputStore
-import com.xixin.apkforge.feature.console.ConsoleUiState
 import com.xixin.apkforge.feature.console.ConsoleViewModel
-import com.xixin.apkforge.ui.anim.InjectArtAnimation
 import com.xixin.apkforge.ui.lifted.AppConstants
 import com.xixin.apkforge.ui.lifted.Gap
 import com.xixin.apkforge.ui.lifted.HGap
 import com.xixin.apkforge.ui.lifted.components.rememberCopyText
+import com.xixin.apkforge.ui.lifted.components.result.LogPanel
+import com.xixin.apkforge.ui.lifted.components.result.LogState
+import com.xixin.apkforge.ui.lifted.m3e.AnimatedSwap
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 运行页（控制台的执行视图）。
@@ -124,62 +109,103 @@ fun RunScreen(
     val copyText = rememberCopyText()
 
     Column(Modifier.fillMaxSize()) {
+        // 两条数据源在这里汇合成同一个值：
+        //  · 历史记录 → 读归档日志 → RunOutcome（live = false）
+        //  · 本次会话 → state.result → RunOutcome（live = true）
+        // 页面只认 RunOutcome。于是「跑完看到什么，以后点记录就看到什么」
+        // 是结构保证的，而不是靠两张页各自记得同步。
+        val viewing = state.viewing
+        val outcome = if (viewing != null) {
+            rememberArchivedOutcome(vm, viewing)
+        } else {
+            state.toOutcome()
+        }
+
+        // 回看历史时，顶栏副标题必须是**数据**（哪个包、哪次），
+        // 不能沿用「结果会一直留在记录里」这种说明句——那是在解释功能，不是在报告状态。
         RunTopBar(
             running = state.running,
-            ok = state.result?.ok,
+            ok = outcome?.ok,
             onBack = onBack,
+            subtitle = viewing?.let { rec ->
+                rec.title + " · " + SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+                    .format(Date(rec.at))
+            },
         )
 
-        AnimatedContent(
-            targetState = if (state.running) 1 else if (state.result != null) 2 else 0,
-            transitionSpec = { fadeIn(tween(240)) togetherWith fadeOut(tween(160)) },
+        // 运行中不再换页：进度与日志在**模态对话框**里（见 InjectProgressDialog 头注释），
+        // 配置页原地保留。一次注入通常 1~5 秒，为它准备一整页是浪费，而且会让
+        // 用户丢失「我刚确认过的配置」这一上下文。
+        AnimatedSwap(
+            // ⚠️ 三态，不是两态。上一版只有「有结果 / 没结果」两种，
+            // 于是**运行中**（result 仍为 null）落进了「没结果」分支，
+            // 显示「还没有在跑的任务」——而顶栏此刻写着「正在注入」。
+            // 一个页面同时说两件相反的事，用户只能理解为 app 坏了。
+            targetState = when {
+                state.running -> 1
+                outcome != null -> 2
+                else -> 0
+            },
             label = "runBody",
         ) { phase ->
             when (phase) {
+                // 运行中：主体让位给进度对话框，这里不摆任何"空"的暗示。
+                // 留空不是偷懒——对话框盖在上面，底层画什么用户都看不到，
+                // 画一个占位符反而会在对话框消失的瞬间闪一下。
+                1 -> Box(Modifier.fillMaxSize())
+
                 0 -> IdleHint(onBack = onBack)
 
-                1 -> RunningBody(
-                    state = state,
-                    modifier = Modifier.fillMaxSize(),
-                )
-
-                else -> ResultBody(
-                    state = state,
-                    modifier = Modifier.fillMaxSize(),
-                    onInstall = {
-                        state.savedFile?.let { f ->
-                            if (!OutputStore.installPath(context, f)) {
-                                vm.showMessage("没有可用的安装器")
+                else -> outcome?.let { o ->
+                    ResultBody(
+                        outcome = o,
+                        modifier = Modifier.fillMaxSize(),
+                        onInstall = {
+                            state.savedFile?.let { f ->
+                                if (!OutputStore.installPath(context, f)) {
+                                    vm.showMessage("没有可用的安装器")
+                                }
                             }
-                        }
-                    },
-                    onLocate = {
-                        state.savedFile?.let { f ->
-                            if (!FilePicker.locateInMt(context, f)) {
-                                vm.showMessage("未安装 MT 管理器")
+                        },
+                        onLocate = {
+                            state.savedFile?.let { f ->
+                                if (!FilePicker.locateInMt(context, f)) {
+                                    vm.showMessage("未安装 MT 管理器")
+                                }
                             }
-                        }
-                    },
-                    onShare = {
-                        state.savedFile?.let { f ->
-                            if (!OutputStore.sharePath(context, f)) {
-                                vm.showMessage("分享失败")
+                        },
+                        onShare = {
+                            state.savedFile?.let { f ->
+                                if (!OutputStore.sharePath(context, f)) {
+                                    vm.showMessage("分享失败")
+                                }
                             }
-                        }
-                    },
-                    onRerun = vm::rerun,
-                    onClose = onExit,
-                    onCopy = copyText,
-                )
+                        },
+                        onRerun = vm::rerun,
+                        onClose = onExit,
+                        onCopy = copyText,
+                    )
+                }
             }
         }
+    }
+
+    // 注入进行中：模态对话框，关不掉（见 InjectProgressDialog 头注释）。
+    if (state.running) {
+        InjectProgressDialog(state = state)
     }
 }
 
 // ══════════════════════ 顶栏 ══════════════════════
 
 @Composable
-private fun RunTopBar(running: Boolean, ok: Boolean?, onBack: () -> Unit) {
+private fun RunTopBar(
+    running: Boolean,
+    ok: Boolean?,
+    onBack: () -> Unit,
+    /** 覆盖副标题。null = 用默认文案（运行中/已完成各一句）。 */
+    subtitle: String? = null,
+) {
     Surface(color = MaterialTheme.colorScheme.background) {
         Row(
             Modifier
@@ -203,9 +229,11 @@ private fun RunTopBar(running: Boolean, ok: Boolean?, onBack: () -> Unit) {
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
-                    if (running) "别退出，dex 正在重写" else "结果会一直留在记录里",
+                    subtitle ?: if (running) "别退出，dex 正在重写" else "结果会一直留在记录里",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                 )
             }
             if (running) PulsingDot()
@@ -240,278 +268,19 @@ private fun PulsingDot() {
     }
 }
 
-// ══════════════════════ 运行中 ══════════════════════
-
-/**
- * 运行中的整页。
- *
- * 结构（自上而下）：进度环与百分比 → 粗进度条 → **单行实时日志** → 展开区。
- * 单行区是主角：它回答「现在在干什么」，而且只占一行，剩下的空间给历史。
- */
-@Composable
-private fun RunningBody(state: ConsoleUiState, modifier: Modifier = Modifier) {
-    val animated by animateFloatAsState(
-        targetValue = state.progress,
-        animationSpec = spring(dampingRatio = 0.9f, stiffness = Spring.StiffnessMediumLow),
-        label = "progress",
-    )
-    val current = state.steps.lastOrNull()
-    var historyOpen by remember { mutableStateOf(false) }
-
-    Column(
-        modifier
-            .padding(horizontal = AppConstants.SCREEN_EDGE_PADDING)
-            .navigationBarsPadding()
-    ) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .padding(top = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            InjectArtAnimation(phaseLabel = "", size = 40.dp, showLabel = false)
-            HGap(12.dp)
-            Text(
-                "${(animated * 100).toInt()}",
-                style = MaterialTheme.typography.displaySmall.copy(
-                    fontFamily = FontFamily.Monospace,
-                    fontWeight = FontWeight.Medium,
-                ),
-            )
-            Text(
-                "%",
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 8.dp),
-            )
-            Spacer(Modifier.weight(1f))
-            Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    state.stage?.label ?: "准备中",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Text(
-                    String.format("%.1fs", (current?.atMs ?: 0L) / 1000.0),
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontFamily = FontFamily.Monospace
-                    ),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-
-        Gap(12.dp)
-        ForgeProgressBar(progress = animated, failed = false, running = true)
-        Gap(16.dp)
-
-        // ── 单行实时日志 ──
-        // 这一行是「现在正在做什么」，不换行、自动吸底式更新（内容整体替换）。
-        // 它替代了上一版「一列条目滚动」的主视觉——用户当时要的就是这一行。
-        LiveLine(
-            step = current,
-            // 高频状态（大条目压缩百分比）优先于最后一个里程碑：
-            // 它才是「此刻在做什么」。里程碑在压缩结束时会被新的一行取代。
-            liveText = state.liveLine.takeIf { it.isNotBlank() },
-            count = state.steps.size,
-            open = historyOpen,
-            onToggle = { historyOpen = !historyOpen },
-        )
-
-        if (historyOpen) {
-            Gap(10.dp)
-            StepHistory(
-                steps = state.steps,
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-            )
-        } else {
-            Spacer(Modifier.weight(1f))
-            Text(
-                "日志共 ${state.steps.size} 行，点上面「展开」可查看全部",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(bottom = 12.dp),
-            )
-        }
-    }
-}
-
-/**
- * 实时日志条。
- *
- * 【为什么是「一条」而不是「一列」】用户当时要的就是这个：运行中屏幕上只有
- * **当前正在做什么**，不是一列要读的条目。历史仍然在，点右侧「展开」就是全量。
- *
- * 【为什么它允许换行，而不是 `maxLines = 1 + Ellipsis`】
- * 一条日志的信息量全在**尾部**（落点方法名、签名、产物路径）。
- * 截断之后剩下的东西既读不出来，也贴不给 AI —— 那不是「整齐」，是把答案删了。
- * 所以这里刻意让 label / detail 各自换行：常态下还是一行，超长时往下长一点，
- * 但一个字都不丢。真要看全部，右侧「展开」给逐条历史 + 一键复制。
- */
-@Composable
-private fun LiveLine(
-    step: ApkInjectPipeline.Step?,
-    liveText: String?,
-    count: Int,
-    open: Boolean,
-    onToggle: () -> Unit,
-) {
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Row(
-            Modifier.padding(start = 12.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
-            verticalAlignment = Alignment.Top,
-        ) {
-            // 小光标：告诉用户这行还在动
-            val t = rememberInfiniteTransition(label = "cursor")
-            val a by t.animateFloat(
-                1f, 0.15f,
-                infiniteRepeatable(tween(560, easing = LinearEasing), RepeatMode.Reverse),
-                label = "cursorAlpha",
-            )
-            Box(
-                Modifier
-                    .padding(top = 4.dp)
-                    .size(6.dp)
-                    .clip(CircleShape)
-                    .background(
-                        (if (step?.warn == true) MaterialTheme.colorScheme.error
-                        else MaterialTheme.colorScheme.primary).copy(alpha = a)
-                    )
-            )
-            HGap(10.dp)
-            Column(Modifier.weight(1f)) {
-                Text(
-                    step?.label ?: "准备中",
-                    style = MaterialTheme.typography.bodySmall.copy(
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Medium,
-                    ),
-                    color = if (step?.warn == true) MaterialTheme.colorScheme.error
-                    else MaterialTheme.colorScheme.onSurface,
-                )
-                // 高频状态（如「写入 classes2.dex 42% 5.2MB/12.5MB」）。
-                // 它比最后一条里程碑更新，所以优先显示；没有时回落到里程碑的 detail。
-                val second = liveText ?: step?.detail
-                if (!second.isNullOrBlank()) {
-                    Text(
-                        second,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontFamily = FontFamily.Monospace,
-                        ),
-                        color = MaterialTheme.colorScheme.outline,
-                    )
-                }
-            }
-            IconButton(onClick = onToggle, modifier = Modifier.size(32.dp)) {
-                Icon(
-                    if (open) Icons.Rounded.UnfoldLess else Icons.Rounded.UnfoldMore,
-                    contentDescription = if (open) "收起日志" else "展开全部 $count 行",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(18.dp),
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun ForgeProgressBar(progress: Float, failed: Boolean, running: Boolean) {
-    val track = MaterialTheme.colorScheme.surfaceContainerHighest
-    val fill = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-    val t = rememberInfiniteTransition(label = "bar")
-    val shimmer by t.animateFloat(
-        0f, 1f,
-        infiniteRepeatable(tween(1200, easing = LinearEasing), RepeatMode.Restart),
-        label = "shimmer",
-    )
-
-    Canvas(
-        Modifier
-            .fillMaxWidth()
-            .height(10.dp)
-    ) {
-        val h = size.height
-        val r = h / 2f
-        drawLine(
-            color = track,
-            start = Offset(r, r),
-            end = Offset(size.width - r, r),
-            strokeWidth = h,
-            cap = StrokeCap.Round,
-        )
-        val w = (size.width - h) * progress.coerceIn(0f, 1f)
-        if (w > 0.5f) {
-            drawLine(
-                color = fill,
-                start = Offset(r, r),
-                end = Offset(r + w, r),
-                strokeWidth = h,
-                cap = StrokeCap.Round,
-            )
-            if (running) {
-                val bandW = 44.dp.toPx().coerceAtMost(w)
-                val headX = r + w
-                drawRect(
-                    brush = Brush.horizontalGradient(
-                        listOf(Color.Transparent, Color.White.copy(alpha = 0.35f)),
-                        startX = headX - bandW,
-                        endX = headX,
-                    ),
-                    topLeft = Offset(headX - bandW, 0f),
-                    size = androidx.compose.ui.geometry.Size(bandW, h),
-                )
-                drawCircle(
-                    color = fill.copy(alpha = 0.22f * (0.5f + shimmer)),
-                    radius = h * 1.5f,
-                    center = Offset(headX, r),
-                )
-            }
-        }
-    }
-}
-
-/** 运行中的历史日志：逐条、可滚动、自动吸底。 */
-@Composable
-private fun StepHistory(steps: List<ApkInjectPipeline.Step>, modifier: Modifier = Modifier) {
-    val listState = rememberLazyListState()
-    val atBottom by remember {
-        androidx.compose.runtime.derivedStateOf {
-            val info = listState.layoutInfo
-            val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
-            last >= steps.lastIndex - 1
-        }
-    }
-    LaunchedEffect(steps.size) {
-        if (steps.isNotEmpty() && atBottom) listState.scrollToItem(steps.size)
-    }
-
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLowest,
-        modifier = modifier,
-    ) {
-        LazyColumn(
-            state = listState,
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-        ) {
-            items(count = steps.size) { i ->
-                LogLine(step = steps[i], latest = i == steps.lastIndex)
-            }
-        }
-    }
-}
-
 // ══════════════════════ 结果 ══════════════════════
 
+/**
+ * 结果页主体。
+ *
+ * 它只认 [RunOutcome]——刚跑完的那次和历史归档的那次，到这里已经是同一种东西。
+ * 「刚跑完」与「回看」的差别只有两处，都由 [RunOutcome.live] 决定：
+ *  · 动作按钮（安装 / 定位 / 分享 / 重跑）只在活的那一侧出现；
+ *  · 历史侧日志默认展开（点进来就是为了读日志），活的那侧默认收起（结论才是主角）。
+ */
 @Composable
 private fun ResultBody(
-    state: ConsoleUiState,
+    outcome: RunOutcome,
     modifier: Modifier = Modifier,
     onInstall: () -> Unit,
     onLocate: () -> Unit,
@@ -520,11 +289,6 @@ private fun ResultBody(
     onClose: () -> Unit,
     onCopy: (String) -> Unit,
 ) {
-    val r = state.result ?: return
-    val ok = r.ok && state.savedPath != null
-    // 日志展开状态是本页唯一的「视图偏好」，不放进 VM：它跟数据无关，只跟当下看的心情有关
-    var logOpen by remember { mutableStateOf(false) }
-
     LazyColumn(
         modifier = modifier,
         contentPadding = PaddingValues(
@@ -535,11 +299,10 @@ private fun ResultBody(
         ),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        // 一张卡说完：结论 / 改了什么 / 产物 / 动作。不再有独立的横幅 + 独立的产物卡。
+        // 一张卡说完：结论 / 改了什么 / 产物 / 动作。
         item {
             OutcomeCard(
-                state = state,
-                ok = ok,
+                outcome = outcome,
                 onInstall = onInstall,
                 onLocate = onLocate,
                 onShare = onShare,
@@ -547,36 +310,49 @@ private fun ResultBody(
             )
         }
 
-        item {
-            RoundSummary(state = state)
-        }
+        item { RoundSummary(outcome = outcome) }
 
+        // 日志面板直接搬 jian_box 的 LogPanel：卡头 + 复制反馈 + 内部滚动。
+        // 不再有「展开/收起」——折叠态只能露出最后一行，而这一页最常见的用法
+        // 恰恰是「滑到底看它卡在哪一步」，多一次点击换不来一屏空间。
         item {
-            LogSection(
-                steps = state.steps,
-                open = logOpen,
-                onToggle = { logOpen = !logOpen },
-                onCopy = onCopy,
+            // 结果页只有一份「已跑完」的文本，所以走 addRaw（不盖墙钟时间戳，
+            // 行首的 +1.24s 已经是相对耗时）；清空按钮关掉——日志是这次运行的证据。
+            // 日志状态跟着文本走：换了记录就重建，避免上一条的内容残留。
+            val logState = remember(outcome.logText) {
+                LogState().apply {
+                    outcome.logText.trimEnd()
+                        .takeIf { it.isNotBlank() }
+                        ?.let { addRaw(it) }
+                }
+            }
+            LogPanel(
+                logs = logState,
+                isError = !outcome.ok,
+                showClearButton = false,
             )
         }
 
-        item {
-            // 上一版的「底部固定按钮条」被收进结果卡，这里只留重跑——
-            // 回控制台是结果卡里的主按钮，重跑是次要动作，分开就不会误点。
-            OutlinedButton(
-                onClick = onRerun,
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(48.dp),
-            ) {
-                Icon(Icons.Rounded.Refresh, null, Modifier.size(18.dp))
-                HGap(6.dp)
-                Text(if (ok) "再跑一次" else "重试")
+        // 历史侧不摆任何按钮：页面的职责是「读」，动作用控制台卡片的 ⋮ 菜单。
+        if (outcome.live) {
+            item {
+                // 「底部固定按钮条」已被收进结果卡，这里只留重跑——
+                // 回控制台是结果卡里的主按钮，重跑是次要动作，分开就不会误点。
+                OutlinedButton(
+                    onClick = onRerun,
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                ) {
+                    Icon(Icons.Rounded.Refresh, null, Modifier.size(18.dp))
+                    HGap(6.dp)
+                    Text(if (outcome.ok) "再跑一次" else "重试")
+                }
             }
-        }
 
-        item { TextButton(onClick = onClose) { Text("回到控制台") } }
+            item { TextButton(onClick = onClose) { Text("回到控制台") } }
+        }
     }
 }
 
@@ -585,17 +361,17 @@ private fun ResultBody(
  *
  * 完成动画放在卡头当图标用（六边形合拢 + 对勾/叉号），**不再画在内容之上**——
  * 上一版那个「遮挡」的观感就是这么来的：动画被当成覆盖层，而它本该是卡片的一部分。
+ * 回看历史时不播动画：那条记录不是「刚刚完成」，让一个对勾重新长出来是在撒谎。
  */
 @Composable
 private fun OutcomeCard(
-    state: ConsoleUiState,
-    ok: Boolean,
+    outcome: RunOutcome,
     onInstall: () -> Unit,
     onLocate: () -> Unit,
     onShare: () -> Unit,
     onCopy: (String) -> Unit,
 ) {
-    val r = state.result ?: return
+    val ok = outcome.ok
     val accent = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
     val container = if (ok) {
         MaterialTheme.colorScheme.surfaceContainerLow
@@ -603,15 +379,25 @@ private fun OutcomeCard(
         MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.35f)
     }
 
+    // 行是数据驱动的：活的那侧不知道配置名/源包（可能已漂移），历史那侧知道，
+    // 就多出两行。用列表拼，而不是五段 if 各写一遍间距。
+    val rows = listOfNotNull(
+        if (ok) "落点" to outcome.targets.joinToString("\n") else null,
+        outcome.configName?.let { "配置" to it },
+        outcome.apkName?.let { "源 APK" to it },
+        if (ok) "产物" to outcome.savedPath.orEmpty() else null,
+        outcome.addedDex?.let { "追加" to it },
+    )
+
     Card(
-        shape = RoundedCornerShape(24.dp),
+        shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = container),
         elevation = CardDefaults.cardElevation(0.dp),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                OutcomeGlyph(ok = ok)
+                OutcomeGlyph(ok = ok, animate = outcome.live)
                 HGap(14.dp)
                 Column(Modifier.weight(1f)) {
                     Text(
@@ -621,60 +407,73 @@ private fun OutcomeCard(
                     )
                     Gap(3.dp)
                     Text(
-                        if (ok) {
-                            val desc = r.targets.joinToString("、") { t ->
-                                if (t.createdMethod) "新建 ${t.methodName}" else "写入 ${t.methodName}"
-                            }
-                            desc.ifBlank { "调用已插入" }
-                        } else {
-                            r.error ?: "未知错误"
-                        },
+                        outcome.summary,
                         style = MaterialTheme.typography.bodySmall,
                         color = if (ok) MaterialTheme.colorScheme.onSurfaceVariant else accent,
                     )
                 }
             }
 
-            if (ok) {
+            if (rows.isNotEmpty()) {
                 Gap(14.dp)
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 Gap(12.dp)
 
-                FmtRow(
-                    label = "落点",
-                    value = r.targets.joinToString("\n") { t ->
-                        "${t.methodName}${t.signature} · ${t.injectedCount} 条" +
-                            if (t.createdMethod) "（新建）" else ""
-                    },
-                )
-                Gap(10.dp)
-                FmtRow(
-                    label = "产物",
-                    value = state.savedPath.orEmpty(),
-                    mono = true,
-                    onCopy = { onCopy(state.savedPath.orEmpty()) },
-                )
-                if (r.stats?.addedDex != null) {
-                    Gap(10.dp)
-                    FmtRow(label = "追加", value = r.stats.addedDex.orEmpty(), mono = true)
+                rows.forEachIndexed { i, (label, value) ->
+                    if (i > 0) Gap(10.dp)
+                    val mono = label == "产物" || label == "源 APK" || label == "追加"
+                    FmtRow(
+                        label = label,
+                        value = value,
+                        mono = mono,
+                        onCopy = if (mono) ({ onCopy(value) }) else null,
+                    )
                 }
+            }
 
+            // 动作只在「刚跑完」出现：产物就在手边，下一步就是装它。
+            if (outcome.live && ok) {
                 Gap(14.dp)
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onInstall, shape = RoundedCornerShape(12.dp)) {
+                // ⚠️ 三颗按钮必须 weight(1f) 平分宽度，且 contentPadding 收窄。
+                //
+                // 上一版没给 weight、用的是 Button 默认水平内边距（24dp×2）：
+                // 三颗按钮的「图标 18 + 间隔 6 + 文字」加上 48dp 内边距后总宽超出卡片，
+                // 最后一颗的「分享」被压成竖排两个字（分 / 享）。
+                // 这不是字号问题——**是没给布局分配规则，让 Compose 自己挤**。
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    // 主操作（安装）用实心，两个次要动作用描边：层级由填充度表达。
+                    Button(
+                        onClick = onInstall,
+                        shape = MaterialTheme.shapes.small,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
                         Icon(Icons.Rounded.InstallMobile, null, Modifier.size(18.dp))
-                        HGap(6.dp)
-                        Text("安装")
+                        HGap(5.dp)
+                        Text("安装", maxLines = 1, softWrap = false)
                     }
-                    OutlinedButton(onClick = onLocate, shape = RoundedCornerShape(12.dp)) {
+                    OutlinedButton(
+                        onClick = onLocate,
+                        shape = MaterialTheme.shapes.small,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
                         Icon(Icons.Rounded.FolderOpen, null, Modifier.size(18.dp))
-                        HGap(6.dp)
-                        Text("MT 定位")
+                        HGap(5.dp)
+                        Text("MT 定位", maxLines = 1, softWrap = false)
                     }
-                    OutlinedButton(onClick = onShare, shape = RoundedCornerShape(12.dp)) {
+                    OutlinedButton(
+                        onClick = onShare,
+                        shape = MaterialTheme.shapes.small,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
                         Icon(Icons.Rounded.Share, null, Modifier.size(18.dp))
-                        HGap(6.dp)
-                        Text("分享")
+                        HGap(5.dp)
+                        Text("分享", maxLines = 1, softWrap = false)
                     }
                 }
                 Gap(10.dp)
@@ -729,10 +528,9 @@ private fun FmtRow(
 
 /** 一行摘要：耗时 / 调用数 / 体积。数字用等宽，扫一眼就能比。 */
 @Composable
-private fun RoundSummary(state: ConsoleUiState) {
-    val r = state.result ?: return
+private fun RoundSummary(outcome: RunOutcome) {
     Surface(
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         modifier = Modifier.fillMaxWidth(),
     ) {
@@ -740,10 +538,11 @@ private fun RoundSummary(state: ConsoleUiState) {
             Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             horizontalArrangement = Arrangement.spacedBy(24.dp),
         ) {
-            Metric(String.format("%.1fs", state.elapsedMs / 1000.0), "总耗时")
-            Metric("${r.injectedCount}", "注入调用")
-            Metric("${r.targets.size}", "落点数")
-            Metric("${(r.stats?.outputSize ?: 0L) / 1048576} MB", "产物")
+            Metric(String.format(Locale.US, "%.1fs", outcome.elapsedMs / 1000.0), "总耗时")
+            Metric("${outcome.injectedCount}", "注入调用")
+            Metric("${outcome.targetCount}", "落点数")
+            // 体积未知（产物被移走 / 老记录没存）就整格不显示，而不是印一个 0 MB。
+            outcome.outputSize?.let { Metric("${it / 1048576} MB", "产物") }
         }
     }
 }
@@ -765,177 +564,19 @@ private fun Metric(value: String, label: String) {
     }
 }
 
-/**
- * 日志区。
- *
- * 三个必须同时成立：
- *  · **可复制**：一键拿到全部日志（含时间戳与阶段），贴给 AI 用；
- *  · **可折叠**：默认收起，只露第一行摘要与行数，不占满整屏；
- *  · **不吞内容**：展开后每行自动换行、可长按选择，没有省略号。
- */
-@Composable
-private fun LogSection(
-    steps: List<ApkInjectPipeline.Step>,
-    open: Boolean,
-    onToggle: () -> Unit,
-    onCopy: (String) -> Unit,
-) {
-    Surface(
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    "执行日志",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                HGap(8.dp)
-                Text(
-                    "${steps.size} 行",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.weight(1f))
-                IconButton(
-                    onClick = { onCopy(renderLog(steps)) },
-                    modifier = Modifier.size(32.dp),
-                ) {
-                    Icon(
-                        Icons.Rounded.ContentCopy,
-                        contentDescription = "复制全部日志",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(17.dp),
-                    )
-                }
-                TextButton(onClick = onToggle) {
-                    Icon(
-                        if (open) Icons.Rounded.UnfoldLess else Icons.Rounded.UnfoldMore,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    HGap(4.dp)
-                    Text(if (open) "收起" else "展开", style = MaterialTheme.typography.labelMedium)
-                }
-            }
-
-            Gap(6.dp)
-            if (open) {
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainerLowest,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    SelectionContainer {
-                        Column(
-                            Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 360.dp)
-                                .verticalScroll(rememberScrollState())
-                                .padding(10.dp)
-                        ) {
-                            steps.forEach { LogLine(step = it, latest = false) }
-                        }
-                    }
-                }
-            } else {
-                // 收起时给最后一条：用户此刻最想知道的「结束在哪一步」
-                val last = steps.lastOrNull()
-                Text(
-                    last?.let { "${it.stage.label} · ${it.label}" } ?: "无日志",
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        fontFamily = FontFamily.Monospace
-                    ),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Gap(4.dp)
-                Text(
-                    "点「展开」查看全部；右上角可一键复制正文",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.outline,
-                )
-            }
-        }
-    }
-}
-
-/**
- * 一条日志。
- *
- * 【关键约束】`maxLines = 1 + Ellipsis` 在这里是错的：日志的落点信息
- * （`→ com.x.demo.DemoDialog.inject(Landroid/app/Activity;)V`）全在行尾，
- * 截断等于只留下「→ com.x.demo...」，既读不出方法也贴不给 AI。
- * 所以这里允许换行，只靠等宽字体保持对齐感。
- */
-@Composable
-private fun LogLine(step: ApkInjectPipeline.Step, latest: Boolean) {
-    val tint = when {
-        step.warn -> MaterialTheme.colorScheme.error
-        latest -> MaterialTheme.colorScheme.onSurface
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
-    }
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(vertical = 1.5.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        Text(
-            String.format("+%.2fs", step.atMs / 1000.0),
-            style = MaterialTheme.typography.labelSmall.copy(
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-            ),
-            color = MaterialTheme.colorScheme.outline,
-            modifier = Modifier.width(46.dp),
-        )
-        HGap(6.dp)
-        Text(
-            step.label + if (step.detail.isNotBlank()) "  ${step.detail}" else "",
-            style = MaterialTheme.typography.labelSmall.copy(
-                fontFamily = FontFamily.Monospace,
-                fontWeight = if (latest) FontWeight.Medium else FontWeight.Normal,
-            ),
-            color = tint,
-            modifier = Modifier.weight(1f),
-        )
-    }
-}
-
-/**
- * 把日志渲染成可复制的纯文本。
- *
- * 带阶段与时间戳：贴给 AI 时，对方能据此判断「卡在重打包」还是「解析就失败了」，
- * 而不需要用户再补充一句「它跑到一半不动了」。
- */
-private fun renderLog(steps: List<ApkInjectPipeline.Step>): String = buildString {
-    appendLine("# ApkForge 执行日志（${steps.size} 行）")
-    steps.forEach { s ->
-        append("+")
-        append(String.format("%.2fs", s.atMs / 1000.0))
-        append("  [")
-        append(s.stage.label)
-        append("] ")
-        if (s.warn) append("! ")
-        append(s.label)
-        if (s.detail.isNotBlank()) {
-            append("  ")
-            append(s.detail)
-        }
-        appendLine()
-    }
-}
-
 /** 完成动画：六边形描出 + 对勾/叉号。作为卡头图标使用，不覆盖内容。 */
 @Composable
-private fun OutcomeGlyph(ok: Boolean) {
+private fun OutcomeGlyph(ok: Boolean, animate: Boolean = true) {
     val color = if (ok) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
     val grow = remember { androidx.compose.animation.core.Animatable(0f) }
-    LaunchedEffect(ok) {
-        grow.snapTo(0f)
-        grow.animateTo(1f, tween(if (ok) 460 else 320, easing = LinearEasing))
+    LaunchedEffect(ok, animate) {
+        if (animate) {
+            grow.snapTo(0f)
+            grow.animateTo(1f, tween(if (ok) 460 else 320, easing = LinearEasing))
+        } else {
+            // 回看历史：直接给终态。这条记录不是「刚刚完成」。
+            grow.snapTo(1f)
+        }
     }
     val p = grow.value
 

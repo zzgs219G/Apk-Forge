@@ -93,6 +93,15 @@ data class ConsoleUiState(
     val elapsedMs: Long = 0L,
 
     val records: List<TaskStore.Record> = emptyList(),
+    /**
+     * 正在「回看」的历史记录。null = 运行页显示本次会话的结果。
+     *
+     * 为什么需要它：运行页与历史日志页是**同一张页**（跑完看到什么，
+     * 以后点记录就看到什么）。差别只在数据源——一个是 `result`，
+     * 一个是归档下来的 `Record` + 日志。
+     * 用完必须清空，否则下次从控制台进运行页会看到上次点开的那条历史。
+     */
+    val viewing: TaskStore.Record? = null,
     val message: String? = null,
 ) {
     val status: ConsoleStatus
@@ -402,6 +411,24 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
 
     // ────────────────────── 面板开关 ──────────────────────
 
+    /** 回看某条历史记录：运行页切成只读日志视图。 */
+    fun viewRecord(record: TaskStore.Record) {
+        state = state.copy(viewing = record)
+    }
+
+    /**
+     * 读某条记录的归档日志。挂在 VM 上而不是让页面自己 new `TaskStore`：
+     * 页面碰存储会绕过「唯一数据入口」，也会在主线程读文件。
+     */
+    suspend fun readLog(id: String): String? = withContext(Dispatchers.IO) {
+        tasks.readLog(id)
+    }
+
+    /** 退出回看。回到控制台 / 开始新任务前都要调，否则运行页会留着旧历史。 */
+    fun clearViewing() {
+        if (state.viewing != null) state = state.copy(viewing = null)
+    }
+
     /** 进配置页前刷新下拉内容（可能在别处新建/改名/删除了配置）。 */
     fun openSetup() = refreshConfigs()
 
@@ -419,6 +446,8 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             running = true,
             steps = emptyList(), progress = 0f, stage = null,
             result = null, savedPath = null, elapsedMs = 0L, message = null,
+            // 新任务一旦开始，回看状态必须让位：否则运行页会带着上一条历史的标题。
+            viewing = null,
         )
 
         viewModelScope.launch {
@@ -491,36 +520,24 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                 )
             }
 
-            // 把本次执行的完整日志写成文件，放在 App 自己的外部目录。
+            val elapsed = System.currentTimeMillis() - startedAt
+            val ok = r.ok && savedPath != null
+            val recordId = "task_${System.currentTimeMillis()}"
+
+            // 日志文本只拼一次（格式由 renderLog 统一），两个去处：
+            //  ① 固定路径 `inject-log.txt` —— 便于导出/排查，仍保留；
+            //  ② 按记录 id 归档 —— 「点历史卡片看日志」的数据源。
             //
             // 【为什么写文件而不是 logcat】`core/` 层禁止 android.util.Log，
             // 而 `System.err` / `println` 在 App 里被重定向到 /dev/null，
             // 根本不进 logcat —— 之前加的计时全白加了，用户看不到。
-            // 写文件最直接：路径固定、内容完整、随时可取。
+            val logText = renderLog(state.steps)
             runCatching {
                 val dir = app.getExternalFilesDir(null) ?: return@runCatching
                 dir.mkdirs()
-                val f = java.io.File(dir, "inject-log.txt")
-                f.writeText(
-                    buildString {
-                        append("ApkForge 执行日志（${state.steps.size} 行）\n")
-                        append("源包: ${apk.name}\n")
-                        append("总耗时: ${System.currentTimeMillis() - startedAt}ms\n")
-                        append("产物: ${savedPath ?: "（无）"}\n")
-                        append("─".repeat(60)).append('\n')
-                        state.steps.forEach { s ->
-                            append("+%.2fs".format(s.atMs / 1000.0))
-                            append("  [${s.stage.label}] ${s.label}")
-                            if (s.detail.isNotBlank()) append("  ${s.detail}")
-                            if (s.warn) append("  ⚠")
-                            append('\n')
-                        }
-                    }
-                )
+                java.io.File(dir, "inject-log.txt").writeText(logText)
             }
 
-            val elapsed = System.currentTimeMillis() - startedAt
-            val ok = r.ok && savedPath != null
             state = state.copy(
                 running = false,
                 stage = null,
@@ -534,7 +551,7 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
             withContext(Dispatchers.IO) {
                 tasks.add(
                     TaskStore.Record(
-                        id = "task_${System.currentTimeMillis()}",
+                        id = recordId,
                         apkName = apk.name,
                         apkLabel = snapshot.apkLabel,
                         apkPath = apk.absolutePath,
@@ -549,11 +566,13 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                         targetSignature = r.resolvedSignature ?: snapshot.targetSignature,
                         outputPath = savedPath,
                         ok = ok,
+                        error = if (ok) null else (r.error ?: "未知错误"),
                         injectedCount = r.injectedCount,
                         durationMs = elapsed,
                         at = System.currentTimeMillis(),
                     )
                 )
+                tasks.writeLog(recordId, logText)
             }
             state = state.copy(records = tasks.list())
         }

@@ -28,6 +28,18 @@ class TaskStore(context: Context) {
     private val apkDir = File(app.filesDir, "apks").apply { mkdirs() }
     private val indexFile = File(dir, "records.json")
 
+    /**
+     * 执行日志归档目录。**一条记录一个文件**。
+     *
+     * 为什么不塞进 `records.json`：这份 JSON 会在控制台每次渲染时被 `list()` 读一次，
+     * 而日志平均几 KB。100 条记录就是几百 KB 的索引，读一次解析一次——
+     * 索引该只装「一眼要看到的字段」，日志是「点开才看」的内容，两者生命周期不同。
+     *
+     * 为什么不只留 `inject-log.txt`：那个文件每次注入覆盖，
+     * 意味着「昨天那次为什么失败」永远查不到。日志的价值恰恰在事后。
+     */
+    private val logDir = File(dir, "logs").apply { mkdirs() }
+
     data class Record(
         val id: String,
         /** 文件名（`app-debug.apk`），物理上动了哪个文件 */
@@ -50,6 +62,14 @@ class TaskStore(context: Context) {
         val targetNames: List<String> = emptyList(),
         val outputPath: String? = null,
         val ok: Boolean = false,
+        /**
+         * 失败原因。成功时为 null。
+         *
+         * 【为什么必须进索引而不是只留在日志里】记录卡片与结果页头部都要用一句话
+         * 说明「为什么没成」。让 UI 去日志文件里找那一行，等于把解析格式的责任
+         * 推给界面，格式一改就静默失效。
+         */
+        val error: String? = null,
         val injectedCount: Int = 0,
         val durationMs: Long = 0L,
         val at: Long = System.currentTimeMillis(),
@@ -111,6 +131,7 @@ class TaskStore(context: Context) {
         val target = all.firstOrNull { it.id == id } ?: return
         val rest = all.filterNot { it.id == id }
         persist(rest)
+        logFile(id).delete()
         val stillUsed = rest.any { it.apkPath == target.apkPath }
         if (!stillUsed && target.apkPath.startsWith(apkDir.absolutePath)) {
             File(target.apkPath).delete()
@@ -120,7 +141,21 @@ class TaskStore(context: Context) {
     /** 清空记录（不动产物文件，产物在 Download 里属于用户资产）。 */
     fun clear() {
         persist(emptyList())
+        logDir.listFiles()?.forEach { it.delete() }
     }
+
+    /** 某条记录的日志文件（可能不存在：老记录归档前就写好了）。 */
+    fun logFile(id: String): File = File(logDir, "$id.txt")
+
+    /** 归档一次执行的完整日志。失败静默——日志写不进去不该让注入本身失败。 */
+    fun writeLog(id: String, text: String) {
+        runCatching { logFile(id).writeText(text) }
+    }
+
+    /** 读回某条记录的日志；没有就返回 null（UI 据此显示「这次没有留下日志」）。 */
+    fun readLog(id: String): String? = runCatching {
+        logFile(id).takeIf { it.isFile }?.readText()
+    }.getOrNull()
 
     private fun persist(items: List<Record>) {
         val arr = JSONArray()
@@ -144,6 +179,7 @@ class TaskStore(context: Context) {
         put("targetNames", JSONArray(r.targetNames))
         put("outputPath", r.outputPath ?: JSONObject.NULL)
         put("ok", r.ok)
+        put("error", r.error ?: JSONObject.NULL)
         put("injectedCount", r.injectedCount)
         put("durationMs", r.durationMs)
         put("at", r.at)
@@ -167,6 +203,7 @@ class TaskStore(context: Context) {
         } ?: emptyList(),
         outputPath = if (o.isNull("outputPath")) null else o.optString("outputPath"),
         ok = o.optBoolean("ok", false),
+        error = if (o.isNull("error")) null else o.optString("error").takeIf { it.isNotBlank() },
         injectedCount = o.optInt("injectedCount", 0),
         durationMs = o.optLong("durationMs", 0L),
         at = o.optLong("at", 0L),
