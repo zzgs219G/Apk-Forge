@@ -9,9 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 
 /**
  * 顶栏。
@@ -52,9 +50,13 @@ fun AppTopBar(
                 modifier = Modifier
                     .weight(1f)
                     .padding(start = 8.dp),
+                // ⚠️ 不再 `headlineLarge + ExtraBold`。此前 AppTypography 未定义
+                // headlineLarge，取到的是 M3 默认 32sp/400，再叠 ExtraBold 就成了
+                // 全 App 最重的一处，却用在每页最显眼的位置——与「中文标题不过重、
+                // 避免整屏发黑」的设计取向直接矛盾。现在 AppTypography 已定义
+                // headlineLarge = 22sp/Medium，这里也不再覆盖字重。
                 style = MaterialTheme.typography.headlineLarge,
-                fontWeight = FontWeight.ExtraBold,
-                letterSpacing = (-0.5).sp
+                color = MaterialTheme.colorScheme.onSurface,
             )
             Row(
                 verticalAlignment = Alignment.CenterVertically,

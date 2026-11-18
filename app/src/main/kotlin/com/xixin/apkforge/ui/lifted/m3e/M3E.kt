@@ -8,6 +8,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
 
 /**
@@ -65,6 +66,20 @@ object M3E {
         // 阻尼 1.0f（临界阻尼）+ 刚度 350f，与底栏 OrbitDock（CleanHydraulicSpring）完全一致，
         // 保证选择动效与底栏同一手感。（主页/各页 tab 栏 AppTabRow 为 NoBouncy/800，见 wrapper/ui/tab/）
         val Pill = spring<Float>(
+            dampingRatio = 1.0f,
+            stiffness = 350f
+        )
+
+        /**
+         * 圆角 morph 专用（`animateDpAsState` 需要 `AnimationSpec<Dp>`，
+         * 不能复用上面 `SpringSpec<Float>` 的 [Pill]）。
+         *
+         * 物理参数与 [Pill] 完全一致（临界阻尼 + 刚度 350）：
+         * 圆角跟随选中态在 shapes.medium ↔ shapes.small 之间 morph 时，
+         * 收尾要有"咬合"而非"滑到位"——这正是 M3E 与普通 M3 的观感分界。
+         * 但阻尼必须为临界值：圆角过冲会短暂切进内容，看起来像 bug。
+         */
+        val Corner = spring<Dp>(
             dampingRatio = 1.0f,
             stiffness = 350f
         )

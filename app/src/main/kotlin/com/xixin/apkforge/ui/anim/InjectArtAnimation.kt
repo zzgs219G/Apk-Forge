@@ -1,5 +1,8 @@
 package com.xixin.apkforge.ui.anim
 
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -78,14 +81,36 @@ fun InjectArtAnimation(
     color: Color = MaterialTheme.colorScheme.primary,
     dimColor: Color = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
     showLabel: Boolean = true,
+    /**
+     * 0..1 的真实进度；传负数表示无限循环（纯装饰场景）。
+     *
+     * ⚠️ 这个参数此前只写在文档注释里、**实现中并不存在** ——
+     * 于是调用方无从把描边接到真实进度上，六边形只能自己匀速转。
+     * 一个装饰性的 loading 图形最坏的地方不是不好看，是**它在暗示一个假进度**：
+     * 用户看到描边走到第四个边，会以为「快完了」，而实际可能刚开始重打包。
+     * 现在改为：给了进度就按进度描边（描边位置 = 真实位置），不给才循环。
+     */
+    phaseProgress: Float = -1f,
 ) {
     val t = rememberInfiniteTransition(label = "inject-art")
 
-    val hexGrow by t.animateFloat(
+    // 给了真实进度就用真实的；否则退回匀速循环（装饰模式）。
+    // 用 animateFloatAsState 而不是直接用 phaseProgress：进度是跳变的
+    // （阶段边界一次跳 0.1~0.3），直接描会「啪」地跳一截，必须补间。
+    val realGrow by animateFloatAsState(
+        targetValue = phaseProgress.coerceIn(0f, 1f),
+        animationSpec = spring(
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = Spring.StiffnessMediumLow,
+        ),
+        label = "hexRealGrow",
+    )
+    val cycling by t.animateFloat(
         0f, 1f,
         infiniteRepeatable(tween(1100, easing = LinearEasing), RepeatMode.Restart),
         label = "hex",
     )
+    val hexGrow = if (phaseProgress >= 0f) realGrow else cycling
     val innerSpin by t.animateFloat(
         0f, 360f,
         infiniteRepeatable(tween(2600, easing = LinearEasing), RepeatMode.Restart),

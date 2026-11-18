@@ -108,6 +108,16 @@ val AppTypography = Typography(
     displaySmall = TextStyle(fontSize = 30.sp, lineHeight = 38.sp, fontWeight = FontWeight.Normal),
     headlineMedium = TextStyle(fontSize = 24.sp, lineHeight = 32.sp, fontWeight = FontWeight.Medium),
     headlineSmall = TextStyle(fontSize = 21.sp, lineHeight = 28.sp, fontWeight = FontWeight.Medium),
+    /**
+     * 页面主标题。
+     *
+     * ⚠️ 必须显式定义。此前这一档缺失，`AppTopBar` 取到的是 M3 默认的
+     * **32sp / weight 400**，代码再叠一层 `FontWeight.ExtraBold` ——
+     * 那是全 App 最重的一处，用在了每页最显眼的位置，与本文件开头
+     * 「中文字形视觉重量大，标题不过重，避免整屏发黑」直接矛盾。
+     * 现在收回到 22sp / Medium，与 titleLarge(19sp) 拉开一档而不过分。
+     */
+    headlineLarge = TextStyle(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Medium),
     titleLarge = TextStyle(fontSize = 19.sp, lineHeight = 26.sp, fontWeight = FontWeight.Medium),
     titleMedium = TextStyle(fontSize = 16.sp, lineHeight = 23.sp, fontWeight = FontWeight.Medium),
     titleSmall = TextStyle(fontSize = 15.sp, lineHeight = 21.sp, fontWeight = FontWeight.Medium),
@@ -119,14 +129,55 @@ val AppTypography = Typography(
     labelSmall = TextStyle(fontSize = 11.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium),
 )
 
-/** 圆角：与 jian_box 工具页一致（卡片 20~24dp，输入框 28dp）。 */
-object Shape {
-    val card = androidx.compose.foundation.shape.RoundedCornerShape(20.dp)
-    val section = androidx.compose.foundation.shape.RoundedCornerShape(24.dp)
-    val field = androidx.compose.foundation.shape.RoundedCornerShape(28.dp)
-    val chip = androidx.compose.foundation.shape.RoundedCornerShape(10.dp)
-    val sheet = androidx.compose.foundation.shape.RoundedCornerShape(28.dp)
+// ⚠️ 这里曾有第二个圆角对象 `object Shape { card=20dp, section=24dp, field=28dp,
+//    chip=10dp, sheet=28dp }`，与下面 AppShapes 的 6/12/18/24/32 **两套数值并存**。
+//    它零引用（全项目 0 处调用），但只要留着，下一个改 UI 的人就会从中挑一个用——
+//    于是同一屏出现 20dp 和 24dp 两种"卡片圆角"。已删除：圆角只允许 AppShapes 一处。
+
+/**
+ * M3 圆角档位 —— 五档语义，禁止新增。
+ *
+ * 移植自 `克隆仓库x/jian_box` 的 `Theme.shapes()`，数值一字未改。
+ * 语义映射见 jian_box `docs/UI设计规范.md` §1.1：
+ *
+ * | 档位 | 用途 |
+ * |---|---|
+ * | `extraLarge` 32dp | 页面级大卡片（Section 卡） |
+ * | `large` 24dp | 对话框、错误提示卡 |
+ * | `medium` 18dp | 卡内子项、图标芯片、缩略图、可点行 |
+ * | `small` 12dp | 小徽标、Chip |
+ * | `extraSmall` 6dp | 行内展开区的次级容器 |
+ *
+ * ⚠️ 为什么必须有这一层：上一版全项目 60 处 `RoundedCornerShape(xx.dp)` 字面量、
+ * 11 种不同档位（4/8/10/12/14/16/18/20/24/28/100），同一个「卡片」概念在不同页面
+ * 用了 20dp 和 28dp 两种圆角。用户看不到代码，只会说「东拼西凑」。
+ * 组件一律写 `MaterialTheme.shapes.extraLarge`，不再写字面量。
+ */
+/**
+ * 五档圆角的 **Dp 值本身**（上面 [AppShapes] 与下面这些常量必须同源）。
+ *
+ * 为什么需要 Dp 形式：`animateDpAsState` / `Modifier.animateContentSize` 之类的
+ * 动画 API 要的是 `Dp`，而 `Shapes` 里装的是 `Shape`（无法反解出数值）。
+ * 如果动画目标值直接写 `12.dp / 18.dp` 字面量，就会出现「静态圆角走令牌、
+ * 动画圆角走字面量」的双轨——档位一改，静态的变了、动画的没变，两者对不上。
+ *
+ * 因此：**静态用 `MaterialTheme.shapes.*`，动画用 `AppRadius.*`，数值只有这一处。**
+ */
+object AppRadius {
+    val extraSmall = 6.dp
+    val small = 12.dp
+    val medium = 18.dp
+    val large = 24.dp
+    val extraLarge = 32.dp
 }
+
+val AppShapes = androidx.compose.material3.Shapes(
+    extraSmall = androidx.compose.foundation.shape.RoundedCornerShape(AppRadius.extraSmall),
+    small = androidx.compose.foundation.shape.RoundedCornerShape(AppRadius.small),
+    medium = androidx.compose.foundation.shape.RoundedCornerShape(AppRadius.medium),
+    large = androidx.compose.foundation.shape.RoundedCornerShape(AppRadius.large),
+    extraLarge = androidx.compose.foundation.shape.RoundedCornerShape(AppRadius.extraLarge),
+)
 
 /** 间距。 */
 object Spacing {

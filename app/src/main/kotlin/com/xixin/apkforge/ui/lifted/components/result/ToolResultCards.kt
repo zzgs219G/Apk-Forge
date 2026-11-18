@@ -1,13 +1,6 @@
 package com.xixin.apkforge.ui.lifted.components.result
 
 import android.content.ClipData
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.togetherWith
-import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -56,6 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.xixin.apkforge.ui.lifted.color.ColorRole
 import com.xixin.apkforge.ui.lifted.color.roleColor
+import com.xixin.apkforge.ui.lifted.m3e.AnimatedSwap
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -362,13 +356,6 @@ private fun CopyAction(copyText: String, tint: Color = MaterialTheme.colorScheme
     val scope = rememberCoroutineScope()
     var copied by remember { mutableStateOf(false) }
 
-    // ⚠️ 必须在 composable 上下文里先取好规格：`transitionSpec` 是非 @Composable lambda，
-    //    在里面读 MaterialTheme.motionScheme 会报「@Composable invocations can only happen…」
-    // ⚠️ 必须写明泛型：`fastEffectsSpec()/defaultSpatialSpec()` 是 <T> 泛型函数，
-    //    直接 val 赋值没有期望类型可推，会报「Cannot infer type for type parameter 'T'」
-    val effectsSpec: FiniteAnimationSpec<Float> = MaterialTheme.motionScheme.fastEffectsSpec()
-    val spatialSpec: FiniteAnimationSpec<Float> = MaterialTheme.motionScheme.defaultSpatialSpec()
-
     IconButton(
         onClick = {
             scope.launch {
@@ -379,16 +366,10 @@ private fun CopyAction(copyText: String, tint: Color = MaterialTheme.colorScheme
             }
         }
     ) {
-        AnimatedContent(
-            targetState = copied,
-            transitionSpec = {
-                (fadeIn(animationSpec = effectsSpec) +
-                    scaleIn(initialScale = 0.7f, animationSpec = spatialSpec)) togetherWith
-                    (fadeOut(animationSpec = effectsSpec) +
-                        scaleOut(targetScale = 0.7f, animationSpec = spatialSpec))
-            },
-            label = "result_copy"
-        ) { success ->
+        // 手写 transitionSpec 已收进 AnimatedSwap（M3E 铁律第 3 条：
+        // 禁止业务代码自己写 transitionSpec）。这里原来抄的就是它的逻辑，
+        // 抄一半就会漏掉缩放、只剩淡入淡出 —— 观感是「图标闪了一下」。
+        AnimatedSwap(targetState = copied, label = "result_copy") { success ->
             Icon(
                 imageVector = if (success) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
                 contentDescription = if (success) "已复制" else "复制结果",

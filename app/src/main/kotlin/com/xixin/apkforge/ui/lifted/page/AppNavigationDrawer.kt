@@ -21,7 +21,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CornerSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.History
@@ -174,7 +174,15 @@ fun AppModalNavigationDrawer(
                     //   前者在 Layout 阶段之后的 Draw 阶段偏移，不触发重新测量，性能更好
                     //   适合高频更新的跟手动画
                     .offset { IntOffset(x = offsetX.roundToInt(), y = 0) }
-                    .clip(RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp))
+                    // 只有右侧两角圆：抽屉贴着屏幕左缘，左侧圆角看不见也没意义。
+                    // 数值取自 shapes.extraLarge（令牌），不写 28.dp 字面量 ——
+                    // 字面量的代价是换主题/改档位时它不跟着变（规范 §2.5 第 7 条）。
+                    .clip(
+                        MaterialTheme.shapes.extraLarge.copy(
+                            topStart = CornerSize(0.dp),
+                            bottomStart = CornerSize(0.dp),
+                        )
+                    )
                     // ── 拖动手势：直接修改 offsetX，完全跟手 ──────────────────
                     .pointerInput(drawerWidthPx) {
                         val velocityTracker = VelocityTracker()

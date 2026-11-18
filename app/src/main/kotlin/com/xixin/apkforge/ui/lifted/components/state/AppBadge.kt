@@ -1,7 +1,6 @@
 package com.xixin.apkforge.ui.lifted.components.state
 
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -41,7 +40,7 @@ fun AppBadge(
     containerColor: Color,
     contentColor: Color,
     modifier: Modifier = Modifier,
-    shape: Shape = RoundedCornerShape(4.dp),
+    shape: Shape = MaterialTheme.shapes.extraSmall,
     textStyle: TextStyle = MaterialTheme.typography.labelSmall,
     horizontalPadding: Dp = 6.dp,
     verticalPadding: Dp = 2.dp,

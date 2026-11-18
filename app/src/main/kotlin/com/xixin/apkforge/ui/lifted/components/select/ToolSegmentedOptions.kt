@@ -8,6 +8,7 @@ import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 
 /**
  * 工具页「互斥选项」分段选择器（官方 M3E `SingleChoiceSegmentedButtonRow` 封装）。
@@ -37,13 +38,20 @@ fun ToolSegmentedOptions(
             SegmentedButton(
                 selected = selectedIndex == index,
                 onClick = { onSelect(index) },
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size)
-            ) {
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.labelLarge
-                )
-            }
+                shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                // 标签在格子内居中且不折行：分段按钮的行高是固定的，
+                // 一旦折行文字会顶出按钮外（实测「每次进 / 入」四条都变两行）。
+                // 传短标签是调用方的责任，这里只保证「折了就截断」而不是破版。
+                label = {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelLarge,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            )
         }
     }
 }

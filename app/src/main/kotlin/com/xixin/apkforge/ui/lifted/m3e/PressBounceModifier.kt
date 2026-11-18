@@ -88,7 +88,17 @@ fun Modifier.pressBounceToggleable(
 
 /**
  * 缩放物理本体（[pressBounce] 与 [pressBounceToggleable] 共用，保证两处手感完全一致）。
- * 动画槽位与既有实现一字未改：`fastSpatialSpec()`。
+ *
+ * ⚠️ 2026-11 修正：此前用 `MaterialTheme.motionScheme.fastSpatialSpec()`。
+ * 那是**贝塞尔缓动**——有加减速，但**没有刚度、没有阻尼比、没有回弹**，
+ * 按下去只是"快速缩小到 0.96"，松手"平顺恢复"，观感是"抽了一下"而不是"按下去"。
+ *
+ * 按压反馈的本质是**物理**：手指压下 → 材料被压缩 → 松开 → 弹性回位。
+ * 这个"回位"只能由 `spring(dampingRatio, stiffness)` 表达。
+ * 现在改走 [M3E.Spring.Pill]（阻尼 1.0f 临界 + 刚度 350f）：
+ * 临界阻尼保证松手不过冲（按压反馈过冲会显得廉价、像果冻），
+ * 刚度 350 给出"硬材质"的响应速度——与底栏胶囊选择同一手感，
+ * 这是 jian_box 里已经被验证过的取值。
  */
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
@@ -99,8 +109,7 @@ private fun Modifier.pressBounceScale(
     val isPressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
         targetValue = if (isPressed) targetScale else 1f,
-        // 原写法 spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow)（= 0.5 / 400）
-        animationSpec = MaterialTheme.motionScheme.fastSpatialSpec(),
+        animationSpec = M3E.Spring.Pill,
         label = "pressBounceScale"
     )
     return this.graphicsLayer {
