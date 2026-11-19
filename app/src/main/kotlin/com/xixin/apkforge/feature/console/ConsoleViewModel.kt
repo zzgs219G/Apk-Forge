@@ -234,6 +234,10 @@ class ConsoleViewModel(app: Application) : AndroidViewModel(app) {
                     manifest == null -> "读不出 AndroidManifest，这个包可能不是标准 APK"
                     launchers.isEmpty() -> "清单里没有 LAUNCHER，请手动填写注入点类名"
                     inspect?.found != true -> "已定位到 ${launchers.first()}，但包里找不到这个类"
+                    // 「换图标」类 App 的入口是 activity-alias，真实注入点是它的
+                    // targetActivity。两者名字不同，不说明的话用户会以为识别错了。
+                    manifest.aliasMap.containsValue(manifest.primaryLauncher) ->
+                        "启动入口是图标别名，已换算为实际的主类 ${launchers.first()}"
                     else -> null
                 },
             )

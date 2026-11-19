@@ -7,7 +7,29 @@ import java.nio.ByteOrder
 /**
  * 二进制 AndroidManifest.xml（AXML）解析器，只做一件事：
  * 找出带 `android.intent.action.MAIN` + `android.intent.category.LAUNCHER` 的
- * `<activity android:name="...">`，返回其原始类名（如 `com.foo.MainActivity`）。
+ * 启动组件，返回**真实存在且可注入的 Activity 类名**（如 `com.foo.MainActivity`）。
+ *
+ * 【`<activity-alias>` 必须换算成 `targetActivity`】
+ * 「换图标」类功能（MT 管理器、许多国产 App 的「暗色/无背景图标」）的典型写法是：
+ * 声明一个真正的 `<activity android:name="bin.mt.plus.Main">`（不带 LAUNCHER），
+ * 再挂若干个 `<activity-alias android:name="...NoBgIcon" targetActivity="...Main">`，
+ * 每个 alias 各带一份 MAIN+LAUNCHER，靠 `android:enabled` 开关决定当前用哪个图标。
+ *
+ * 此时 `activity-alias` 的 `android:name` **不是类名**，只是清单里的别名，
+ * dex 里没有这个类。若把它当注入点填进 UI，注入会报「包里找不到这个类」——
+ * 而这正是旧实现的错法：它把 alias 的 name 直接当成 launcher 返回了。
+ * 真实落点只能是 `android:targetActivity` 指向的那个类。
+ *
+ * 【`android:enabled="false"` 的组件必须跳过】
+ * 同一套「换图标」里通常并排声明多个 alias，只有一个是 enabled 的。
+ * 未启用的组件不会出现在启动器里，也就不会是用户点开的那个入口。
+ * 旧实现不看 enabled，取 `first()` 于是稳定地拿到清单里第一个——恰好是禁用项。
+ *
+ * 【为什么只能在同一 `<intent-filter>` 内配对 MAIN 与 LAUNCHER】
+ * Android 的判定是「同一个 filter 里同时声明 MAIN 和 LAUNCHER」才算启动入口。
+ * 旧实现按元素出现顺序跨 filter 累积两个布尔值，会把
+ * 「filter A 有 MAIN、filter B 有 LAUNCHER」这种组件误判成启动入口——
+ * 而它在启动器里根本不出现。故改为每进入一层 `intent-filter` 重置配对状态。
  *
  * 【为什么不引依赖】可选方案是 net.dongliu:apk-parser（拉 bcprov/bcpkix 1.58）
  * 或 JitPack 上的 axml（仓库 401 未验证）。而本项目只需要「读」，不需要「写回」，
@@ -46,11 +68,22 @@ object AxmlManifest {
 
     private const val ANDROID_NS = "http://schemas.android.com/apk/res/android"
 
-    /** 解析结果。launcher 类名可能为空（例如包内只有一个 Application，或无 LAUNCHER）。 */
+    /**
+     * 解析结果。
+     *
+     * [launcherActivities] 里**只会是真正的 Activity 类名**——
+     * `activity-alias` 已经被换算成它的 `targetActivity`。可能为空
+     * （包内只有一个 Application，或确实没有 LAUNCHER）。
+     */
     data class Result(
         val packageName: String?,
         val launcherActivities: List<String>,
         val applicationName: String?,
+        /**
+         * 被换算掉的 alias 名 → 真实类名。仅用于日志/说明，
+         * 让用户知道「你看到的入口名」与「实际注入的类」不是一回事。
+         */
+        val aliasMap: Map<String, String> = emptyMap(),
     ) {
         val primaryLauncher: String? get() = launcherActivities.firstOrNull()
     }
@@ -69,15 +102,22 @@ object AxmlManifest {
         var strings: List<String> = emptyList()
 
         // 元素栈：用来把 <activity> 与嵌套的 <intent-filter>/<action>/<category> 关联起来。
-        // 只需要记住最近一次 START 的 activity 名和它的 intent-filter 状况。
+        // 只需要记住最近一次 START 的组件名、它是不是 disabled、以及当前 filter 的配对状况。
         val launchers = ArrayList<String>()
+        val aliasMap = LinkedHashMap<String, String>()
         var packageName: String? = null
         var applicationName: String? = null
 
-        var inActivityDepth = -1          // >0 表示当前在 activity 内部
+        var inActivityDepth = -1          // >0 表示当前在 activity / activity-alias 内部
         var currentActivityName: String? = null
+        var currentTargetActivity: String? = null   // activity-alias 的 targetActivity
+        var currentEnabled = true                    // android:enabled="false" 时跳过
         var currentActivityHasMain = false
         var currentActivityHasLauncher = false
+        // 进入 <intent-filter> 时的 depth；-1 表示当前不在 filter 内。
+        // MAIN 与 LAUNCHER 必须在**同一个** filter 里才算启动入口，故每进一层 filter
+        // 重置配对状态——旧实现跨 filter 累积，会把「A 有 MAIN、B 有 LAUNCHER」误判成入口。
+        var inFilterDepth = -1
         var depth = 0
 
         while (pos + 8 <= buf.limit()) {
@@ -98,16 +138,29 @@ object AxmlManifest {
                         "activity", "activity-alias" -> {
                             inActivityDepth = depth
                             currentActivityName = el.attrs["name"]
+                            currentTargetActivity = el.attrs["targetActivity"]
+                            // 只有显式 false 才算禁用；缺省 / 资源引用一律视为启用。
+                            currentEnabled = el.attrs["enabled"] != "false"
                             currentActivityHasMain = false
                             currentActivityHasLauncher = false
+                            inFilterDepth = -1
+                        }
+                        "intent-filter" -> {
+                            if (inActivityDepth > 0 && depth > inActivityDepth) {
+                                inFilterDepth = depth
+                                currentActivityHasMain = false
+                                currentActivityHasLauncher = false
+                            }
                         }
                         "action" -> {
-                            if (inActivityDepth > 0 && el.attrs["name"] == "android.intent.action.MAIN") {
+                            if (inActivityDepth > 0 && inFilterDepth > 0 &&
+                                el.attrs["name"] == "android.intent.action.MAIN"
+                            ) {
                                 currentActivityHasMain = true
                             }
                         }
                         "category" -> {
-                            if (inActivityDepth > 0 &&
+                            if (inActivityDepth > 0 && inFilterDepth > 0 &&
                                 el.attrs["name"] == "android.intent.category.LAUNCHER"
                             ) {
                                 currentActivityHasLauncher = true
@@ -118,14 +171,31 @@ object AxmlManifest {
 
                 CHUNK_END_ELEMENT -> {
                     val name = readEndElementName(buf, pos, headerSize, strings)
+                    if (name == "intent-filter" && depth == inFilterDepth) {
+                        inFilterDepth = -1
+                    }
                     if ((name == "activity" || name == "activity-alias") && depth == inActivityDepth) {
                         val n = currentActivityName
-                        if (!n.isNullOrBlank() && currentActivityHasMain && currentActivityHasLauncher) {
-                            // android:name 可能是相对类名（".MainActivity"），补全成完整类名
-                            launchers += normalizeClassName(n, packageName)
+                        if (!n.isNullOrBlank() && currentEnabled &&
+                            currentActivityHasMain && currentActivityHasLauncher
+                        ) {
+                            // activity-alias 的 android:name 只是清单别名，dex 里没有这个类。
+                            // 真实落点必须是 targetActivity 指向的那个 Activity。
+                            val target = currentTargetActivity
+                            if (name == "activity-alias" && !target.isNullOrBlank()) {
+                                val real = normalizeClassName(target, packageName)
+                                launchers += real
+                                aliasMap[normalizeClassName(n, packageName)] = real
+                            } else {
+                                // 相对类名（".MainActivity"）补全成完整类名
+                                launchers += normalizeClassName(n, packageName)
+                            }
                         }
                         inActivityDepth = -1
+                        inFilterDepth = -1
                         currentActivityName = null
+                        currentTargetActivity = null
+                        currentEnabled = true
                     }
                     depth--
                 }
@@ -137,6 +207,7 @@ object AxmlManifest {
             packageName = packageName,
             launcherActivities = launchers.distinct(),
             applicationName = applicationName?.let { normalizeClassName(it, packageName) },
+            aliasMap = aliasMap,
         )
     }
 
