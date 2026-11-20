@@ -3,6 +3,13 @@
     <uses-permission 
         android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />                
 
+    <!--
+      去签名校验的载荷（boot.dex / payload.dex）从远端拉取，需要联网。
+      漏这条的症状是 SecurityException: Permission denied (missing INTERNET permission?)，
+      报在 DNS 解析阶段，看起来像网络问题，实际是权限问题。
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Android 9 及以下写 Download 需要；10+ 走 MediaStore 免权限 -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"

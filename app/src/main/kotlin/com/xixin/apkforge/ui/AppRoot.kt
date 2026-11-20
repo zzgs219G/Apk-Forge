@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Extension
 import androidx.compose.material.icons.rounded.Layers
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VerifiedUser
@@ -50,6 +51,7 @@ import com.xixin.apkforge.ui.screen.plugin.PluginScreen
 import com.xixin.apkforge.ui.screen.console.ConsoleScreen
 import com.xixin.apkforge.ui.screen.run.RunScreen
 import com.xixin.apkforge.ui.screen.setup.SetupScreen
+import com.xixin.apkforge.ui.screen.uncheck.UncheckScreen
 import kotlinx.coroutines.launch
 
 /**
@@ -71,6 +73,7 @@ enum class AppDest(
     BATCH("batch", "批量", Icons.Rounded.Layers),
     PLUGIN("plugin", "插件包", Icons.Rounded.Extension),
     SIGN("sign", "签名", Icons.Rounded.VerifiedUser),
+    UNCHECK("uncheck", "去签名校验", Icons.Rounded.Security),
     ABOUT("about", "关于", Icons.Rounded.Info),
 
     SETUP("setup", "注入配置", Icons.Rounded.Tune, inMenu = false),
@@ -261,6 +264,9 @@ fun AppRoot(
                     onBackToConsole = { go(AppDest.CONSOLE) },
                     onSaved = console::refreshConfigs,
                 )
+            }
+            composable(AppDest.UNCHECK.route) {
+                UncheckScreen(onOpenDrawer = { scope.launch { drawerState.open() } })
             }
             composable(AppDest.SIGN.route) {
                 ComingSoonScreen(
