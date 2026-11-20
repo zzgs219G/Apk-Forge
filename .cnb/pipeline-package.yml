@@ -21,14 +21,59 @@
 main:
   web_trigger_package:
   - name: 云端打包 APK
+    runner:
+      # 4 核（8 GiB）。实测 8 核对本工程无收益：瓶颈在固定的 I/O 与串行阶段
+      # （装 SDK、解压依赖、编译、签名），不在 CPU。
+      # ⚠️ 2 核会 OOM：Gradle daemon 堆 + Kotlin 编译子进程 + AGP worker 合计超 4 GiB。
+      cpus: 4
     docker:
+      # 与 .cnb/cache.dockerfile 的 FROM 保持一致（36.1.0 = openjdk-21）
       image: mobiledevops/android-sdk-image:36.1.0
+      # 编译产物缓存。docker:cache 的镜像是按 versionBy 哈希的一次性快照，
+      # 不会把每次构建的新产物写回去，所以 build-cache 只能靠节点目录累积。
+      # volumes 每个节点各自累积（前几次各节点冷启动，跑满一轮后都热）。
+      volumes:
+        - main:/workspace/.gradle-home:copy-on-write
     stages:
+    - name: 构建依赖缓存镜像
+      type: docker:cache
+      options:
+        dockerfile: .cnb/cache.dockerfile
+        # 依赖清单变更时才重建镜像；源码改动不触发
+        by:
+          - gradle/libs.versions.toml
+          - gradle/wrapper
+          - gradlew
+          - settings.gradle.kts
+          - build.gradle.kts
+          - app/build.gradle.kts
+          - gradle.properties
+        versionBy:
+          - gradle/libs.versions.toml
+          - gradle/wrapper/gradle-wrapper.properties
+      exports:
+        name: GRADLE_CACHE_IMAGE
     - name: 计算版本号
       script: "set -e\nsh .cnb/scripts/resolve-version.sh\n"
+    - name: 恢复依赖缓存
+      image: $GRADLE_CACHE_IMAGE
+      # 缓存镜像里 Gradle 家目录在 /space/gradle-home（不能用 /workspace，那是仓库挂载点）。
+      # 目标 /workspace/.gradle-home 是 docker.volumes 挂载点：已有内容说明本节点
+      # 缓存命中，绝不能覆盖 —— 那里累积着上次构建的 build-cache。
+      script: |
+        set -e
+        if [ -d /workspace/.gradle-home/caches ]; then
+          echo "本节点缓存命中 $(du -sh /workspace/.gradle-home | cut -f1)，跳过依赖恢复"
+        elif [ -d /space/gradle-home ]; then
+          cp -a /space/gradle-home/. /workspace/.gradle-home/
+          echo "已从镜像恢复依赖 $(du -sh /workspace/.gradle-home | cut -f1)"
+        else
+          echo "缓存镜像内无 /space/gradle-home，本次将重新下载依赖"
+        fi
     - name: 准备 Android SDK
       # 逻辑收敛到 .cnb/scripts/ensure-sdk.sh，三个入口共用一份。
-      # 顶部注释说明了为什么不能写死包名、也不能写死 sdkmanager 路径。
+      # 镜像已预装 platforms;android-37.0 + build-tools;37.0.0，
+      # 脚本检测到就位会直接跳过安装。
       script: "set -e\nsh .cnb/scripts/ensure-sdk.sh\n"
     - name: 生成示例 payload dex
       # assets/sample/DemoDialog.dex 是「载入示例」功能的依赖，
@@ -41,7 +86,34 @@ main:
     - name: 准备签名配置
       script: "if [ -n \"$KEYSTORE_BASE64\" ]; then\n  echo \"$KEYSTORE_BASE64\" | base64 -d > release.keystore\n  {\n    echo \"storeFile=release.keystore\"\n    echo \"storePassword=$KEYSTORE_STORE_PASSWORD\"\n    echo \"keyAlias=$KEYSTORE_KEY_ALIAS\"\n    echo \"keyPassword=$KEYSTORE_KEY_PASSWORD\"\n  } > release.properties\n  echo \"✔ 已使用 Secrets 中的签名密钥\"\nelse\n  echo \"⚠ 未配置 KEYSTORE_BASE64，正式版将不签名\"\nfi\n"
     - name: 执行打包
-      script: "sh .cnb/scripts/gradle-build.sh\n"
+      # 用缓存镜像而非基础镜像：它预装了 SDK 37 + build-tools 37.0.0，
+      # 否则每次都要现场 sdkmanager 下载（/opt 下，任何 volume 都缓存不到）。
+      #
+      # ⚠️ 本阶段跑在独立容器里，取不到上一 stage 写在 /tmp/cnb/vars.sh 的变量
+      #    （/tmp 不跨容器）。故这里按同一规则重算 GRADLE_TASK 并重建 vars.sh。
+      #    规则与「确定打包类型」stage 必须保持一致。
+      image: $GRADLE_CACHE_IMAGE
+      env:
+        # 指向 docker.volumes 挂载点：同节点重复构建时复用依赖与 build-cache
+        GRADLE_USER_HOME: /workspace/.gradle-home
+      script: |
+        set -e
+        # 缓存镜像的 WORKDIR 是 /space（只放依赖清单），仓库代码挂在 /workspace。
+        cd /workspace
+        mkdir -p /tmp/cnb
+        sh .cnb/scripts/resolve-version.sh
+        if [ "$CNB_IS_TAG" = "true" ] || [ "$build_type" = "正式版(release)" ]; then
+          GRADLE_TASK="assembleRelease"; PKG_TYPE="正式版"
+        elif [ "$build_type" = "全部(both)" ]; then
+          GRADLE_TASK="assembleDebug assembleRelease"; PKG_TYPE="全部"
+        else
+          GRADLE_TASK="assembleDebug"; PKG_TYPE="测试版"
+        fi
+        echo "GRADLE_TASK='$GRADLE_TASK'" >> /tmp/cnb/vars.sh
+        echo "PKG_TYPE='$PKG_TYPE'" >> /tmp/cnb/vars.sh
+        echo "log_level='$log_level'" >> /tmp/cnb/vars.sh
+        echo "打包任务=$GRADLE_TASK"
+        sh .cnb/scripts/gradle-build.sh
     - name: 整理 APK
       script: "[ -f /tmp/cnb/vars.sh ] && . /tmp/cnb/vars.sh\nset -e\ncase \"$GRADLE_TASK\" in\n  assembleRelease)\n    APK_DIRS=\"app/build/outputs/apk/release\" ;;\n  \"assembleDebug assembleRelease\")\n    APK_DIRS=\"app/build/outputs/apk/release app/build/outputs/apk/debug\" ;;\n  *)\n    APK_DIRS=\"app/build/outputs/apk/debug\" ;;\nesac\necho \"查找 APK，目录：$APK_DIRS\"\nfind app/build/outputs -name \"*.apk\" 2>/dev/null || echo \"没找到 APK\"\nmkdir -p dist\nSHA=$(git rev-parse --short HEAD)\nDATE=$(date +%Y%m%d-%H%M)\nCOUNT=0\nfor APK_DIR in $APK_DIRS; do\n  case \"$APK_DIR\" in\n    *release*) TYPE=\"正式版\" ;;\n    *) TYPE=\"测试版\" ;;\n  esac\n  for f in \"$APK_DIR\"/*.apk; do\n    [ -e \"$f\" ] || continue\n    cp \"$f\" \"dist/ApkForge-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"\n    echo \"✔ dist/ApkForge-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"\n    COUNT=$((COUNT+1))\n  done\ndone\nif [ \"$COUNT\" -eq 0 ]; then\n  echo \"❌ 没有 APK 产出\"; exit 1\nfi\nsha256sum dist/*.apk > dist/checksums.txt\nls -lh dist/\n"
     - name: 上传 APK 到附件
@@ -54,7 +126,7 @@ main:
         ttl: 7
     - name: 收集构建日志
       if: always()
-      script: "mkdir -p build-log/daemon\ncp -f \"$HOME\"/.gradle/daemon/*/*.out.log build-log/daemon/ 2>/dev/null || true\n{\n  echo \"# Gradle 守护进程日志\"\n  for f in build-log/daemon/*.out.log; do\n    [ -e \"$f\" ] || continue\n    echo \"===== $(basename \"$f\") =====\"\n    tail -n 2000 \"$f\"\n  done\n} > build-log/gradle-daemon.log 2>/dev/null || true\n[ -s build-log/gradle-daemon.log ] || echo \"本次构建未产生 Gradle 守护进程日志\" > build-log/gradle-daemon.log\nls -lh build-log/ || true\n"
+      script: "mkdir -p build-log/daemon\nfor d in /workspace/.gradle-home/daemon \"$HOME\"/.gradle/daemon; do cp -f \"$d\"/*/*.out.log build-log/daemon/ 2>/dev/null || true; done\n{\n  echo \"# Gradle 守护进程日志\"\n  for f in build-log/daemon/*.out.log; do\n    [ -e \"$f\" ] || continue\n    echo \"===== $(basename \"$f\") =====\"\n    tail -n 2000 \"$f\"\n  done\n} > build-log/gradle-daemon.log 2>/dev/null || true\n[ -s build-log/gradle-daemon.log ] || echo \"本次构建未产生 Gradle 守护进程日志\" > build-log/gradle-daemon.log\nls -lh build-log/ || true\n"
     - name: 上传构建日志到附件
       if: always()
       image: cnbcool/attachments:latest
@@ -65,14 +137,59 @@ main:
         ttl: 7
   api_trigger:
   - name: API 打包
+    runner:
+      # 4 核（8 GiB）。实测 8 核对本工程无收益：瓶颈在固定的 I/O 与串行阶段
+      # （装 SDK、解压依赖、编译、签名），不在 CPU。
+      # ⚠️ 2 核会 OOM：Gradle daemon 堆 + Kotlin 编译子进程 + AGP worker 合计超 4 GiB。
+      cpus: 4
     docker:
+      # 与 .cnb/cache.dockerfile 的 FROM 保持一致（36.1.0 = openjdk-21）
       image: mobiledevops/android-sdk-image:36.1.0
+      # 编译产物缓存。docker:cache 的镜像是按 versionBy 哈希的一次性快照，
+      # 不会把每次构建的新产物写回去，所以 build-cache 只能靠节点目录累积。
+      # volumes 每个节点各自累积（前几次各节点冷启动，跑满一轮后都热）。
+      volumes:
+        - main:/workspace/.gradle-home:copy-on-write
     stages:
+    - name: 构建依赖缓存镜像
+      type: docker:cache
+      options:
+        dockerfile: .cnb/cache.dockerfile
+        # 依赖清单变更时才重建镜像；源码改动不触发
+        by:
+          - gradle/libs.versions.toml
+          - gradle/wrapper
+          - gradlew
+          - settings.gradle.kts
+          - build.gradle.kts
+          - app/build.gradle.kts
+          - gradle.properties
+        versionBy:
+          - gradle/libs.versions.toml
+          - gradle/wrapper/gradle-wrapper.properties
+      exports:
+        name: GRADLE_CACHE_IMAGE
     - name: 计算版本号
       script: "set -e\nsh .cnb/scripts/resolve-version.sh\n"
+    - name: 恢复依赖缓存
+      image: $GRADLE_CACHE_IMAGE
+      # 缓存镜像里 Gradle 家目录在 /space/gradle-home（不能用 /workspace，那是仓库挂载点）。
+      # 目标 /workspace/.gradle-home 是 docker.volumes 挂载点：已有内容说明本节点
+      # 缓存命中，绝不能覆盖 —— 那里累积着上次构建的 build-cache。
+      script: |
+        set -e
+        if [ -d /workspace/.gradle-home/caches ]; then
+          echo "本节点缓存命中 $(du -sh /workspace/.gradle-home | cut -f1)，跳过依赖恢复"
+        elif [ -d /space/gradle-home ]; then
+          cp -a /space/gradle-home/. /workspace/.gradle-home/
+          echo "已从镜像恢复依赖 $(du -sh /workspace/.gradle-home | cut -f1)"
+        else
+          echo "缓存镜像内无 /space/gradle-home，本次将重新下载依赖"
+        fi
     - name: 准备 Android SDK
       # 逻辑收敛到 .cnb/scripts/ensure-sdk.sh，三个入口共用一份。
-      # 顶部注释说明了为什么不能写死包名、也不能写死 sdkmanager 路径。
+      # 镜像已预装 platforms;android-37.0 + build-tools;37.0.0，
+      # 脚本检测到就位会直接跳过安装。
       script: "set -e\nsh .cnb/scripts/ensure-sdk.sh\n"
     - name: 生成示例 payload dex
       # assets/sample/DemoDialog.dex 是「载入示例」功能的依赖，
@@ -85,7 +202,34 @@ main:
     - name: 准备签名配置
       script: "if [ -n \"$KEYSTORE_BASE64\" ]; then\n  echo \"$KEYSTORE_BASE64\" | base64 -d > release.keystore\n  { echo \"storeFile=release.keystore\"; echo \"storePassword=$KEYSTORE_STORE_PASSWORD\"; echo \"keyAlias=$KEYSTORE_KEY_ALIAS\"; echo \"keyPassword=$KEYSTORE_KEY_PASSWORD\"; } > release.properties\nfi\n"
     - name: 执行打包
-      script: "sh .cnb/scripts/gradle-build.sh\n"
+      # 用缓存镜像而非基础镜像：它预装了 SDK 37 + build-tools 37.0.0，
+      # 否则每次都要现场 sdkmanager 下载（/opt 下，任何 volume 都缓存不到）。
+      #
+      # ⚠️ 本阶段跑在独立容器里，取不到上一 stage 写在 /tmp/cnb/vars.sh 的变量
+      #    （/tmp 不跨容器）。故这里按同一规则重算 GRADLE_TASK 并重建 vars.sh。
+      #    规则与「确定打包类型」stage 必须保持一致。
+      image: $GRADLE_CACHE_IMAGE
+      env:
+        # 指向 docker.volumes 挂载点：同节点重复构建时复用依赖与 build-cache
+        GRADLE_USER_HOME: /workspace/.gradle-home
+      script: |
+        set -e
+        # 缓存镜像的 WORKDIR 是 /space（只放依赖清单），仓库代码挂在 /workspace。
+        cd /workspace
+        mkdir -p /tmp/cnb
+        sh .cnb/scripts/resolve-version.sh
+        if [ "$CNB_IS_TAG" = "true" ] || [ "$build_type" = "正式版(release)" ]; then
+          GRADLE_TASK="assembleRelease"; PKG_TYPE="正式版"
+        elif [ "$build_type" = "全部(both)" ]; then
+          GRADLE_TASK="assembleDebug assembleRelease"; PKG_TYPE="全部"
+        else
+          GRADLE_TASK="assembleDebug"; PKG_TYPE="测试版"
+        fi
+        echo "GRADLE_TASK='$GRADLE_TASK'" >> /tmp/cnb/vars.sh
+        echo "PKG_TYPE='$PKG_TYPE'" >> /tmp/cnb/vars.sh
+        echo "log_level='$log_level'" >> /tmp/cnb/vars.sh
+        echo "打包任务=$GRADLE_TASK"
+        sh .cnb/scripts/gradle-build.sh
     - name: 整理 APK
       script: "[ -f /tmp/cnb/vars.sh ] && . /tmp/cnb/vars.sh\nset -e\ncase \"$GRADLE_TASK\" in\n  assembleRelease) APK_DIRS=\"app/build/outputs/apk/release\" ;;\n  \"assembleDebug assembleRelease\") APK_DIRS=\"app/build/outputs/apk/release app/build/outputs/apk/debug\" ;;\n  *) APK_DIRS=\"app/build/outputs/apk/debug\" ;;\nesac\nmkdir -p dist\nSHA=$(git rev-parse --short HEAD); DATE=$(date +%Y%m%d-%H%M); COUNT=0\nfor APK_DIR in $APK_DIRS; do\n  case \"$APK_DIR\" in *release*) TYPE=\"正式版\" ;; *) TYPE=\"测试版\" ;; esac\n  for f in \"$APK_DIR\"/*.apk; do\n    [ -e \"$f\" ] || continue\n    cp \"$f\" \"dist/ApkForge-${TYPE}-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"; COUNT=$((COUNT+1))\n  done\ndone\n[ \"$COUNT\" -gt 0 ] || { echo \"❌ 没有 APK 产出\"; exit 1; }\nsha256sum dist/*.apk > dist/checksums.txt\nls -lh dist/\n"
     - name: 上传 APK 到附件
@@ -98,7 +242,7 @@ main:
         ttl: 7
     - name: 收集构建日志
       if: always()
-      script: "mkdir -p build-log/daemon\ncp -f \"$HOME\"/.gradle/daemon/*/*.out.log build-log/daemon/ 2>/dev/null || true\n{ echo \"# Gradle 守护进程日志\"; for f in build-log/daemon/*.out.log; do [ -e \"$f\" ] || continue; echo \"===== $(basename \"$f\") =====\"; tail -n 2000 \"$f\"; done; } > build-log/gradle-daemon.log 2>/dev/null || true\n[ -s build-log/gradle-daemon.log ] || echo \"无 daemon 日志\" > build-log/gradle-daemon.log\n"
+      script: "mkdir -p build-log/daemon\nfor d in /workspace/.gradle-home/daemon \"$HOME\"/.gradle/daemon; do cp -f \"$d\"/*/*.out.log build-log/daemon/ 2>/dev/null || true; done\n{ echo \"# Gradle 守护进程日志\"; for f in build-log/daemon/*.out.log; do [ -e \"$f\" ] || continue; echo \"===== $(basename \"$f\") =====\"; tail -n 2000 \"$f\"; done; } > build-log/gradle-daemon.log 2>/dev/null || true\n[ -s build-log/gradle-daemon.log ] || echo \"无 daemon 日志\" > build-log/gradle-daemon.log\n"
     - name: 上传构建日志到附件
       if: always()
       image: cnbcool/attachments:latest
@@ -110,14 +254,59 @@ main:
 v*:
   tag_push:
   - name: 标签发布 · 自动正式版
+    runner:
+      # 4 核（8 GiB）。实测 8 核对本工程无收益：瓶颈在固定的 I/O 与串行阶段
+      # （装 SDK、解压依赖、编译、签名），不在 CPU。
+      # ⚠️ 2 核会 OOM：Gradle daemon 堆 + Kotlin 编译子进程 + AGP worker 合计超 4 GiB。
+      cpus: 4
     docker:
+      # 与 .cnb/cache.dockerfile 的 FROM 保持一致（36.1.0 = openjdk-21）
       image: mobiledevops/android-sdk-image:36.1.0
+      # 编译产物缓存。docker:cache 的镜像是按 versionBy 哈希的一次性快照，
+      # 不会把每次构建的新产物写回去，所以 build-cache 只能靠节点目录累积。
+      # volumes 每个节点各自累积（前几次各节点冷启动，跑满一轮后都热）。
+      volumes:
+        - main:/workspace/.gradle-home:copy-on-write
     stages:
+    - name: 构建依赖缓存镜像
+      type: docker:cache
+      options:
+        dockerfile: .cnb/cache.dockerfile
+        # 依赖清单变更时才重建镜像；源码改动不触发
+        by:
+          - gradle/libs.versions.toml
+          - gradle/wrapper
+          - gradlew
+          - settings.gradle.kts
+          - build.gradle.kts
+          - app/build.gradle.kts
+          - gradle.properties
+        versionBy:
+          - gradle/libs.versions.toml
+          - gradle/wrapper/gradle-wrapper.properties
+      exports:
+        name: GRADLE_CACHE_IMAGE
     - name: 计算版本号
       script: "set -e\nsh .cnb/scripts/resolve-version.sh\n"
+    - name: 恢复依赖缓存
+      image: $GRADLE_CACHE_IMAGE
+      # 缓存镜像里 Gradle 家目录在 /space/gradle-home（不能用 /workspace，那是仓库挂载点）。
+      # 目标 /workspace/.gradle-home 是 docker.volumes 挂载点：已有内容说明本节点
+      # 缓存命中，绝不能覆盖 —— 那里累积着上次构建的 build-cache。
+      script: |
+        set -e
+        if [ -d /workspace/.gradle-home/caches ]; then
+          echo "本节点缓存命中 $(du -sh /workspace/.gradle-home | cut -f1)，跳过依赖恢复"
+        elif [ -d /space/gradle-home ]; then
+          cp -a /space/gradle-home/. /workspace/.gradle-home/
+          echo "已从镜像恢复依赖 $(du -sh /workspace/.gradle-home | cut -f1)"
+        else
+          echo "缓存镜像内无 /space/gradle-home，本次将重新下载依赖"
+        fi
     - name: 准备 Android SDK
       # 逻辑收敛到 .cnb/scripts/ensure-sdk.sh，三个入口共用一份。
-      # 顶部注释说明了为什么不能写死包名、也不能写死 sdkmanager 路径。
+      # 镜像已预装 platforms;android-37.0 + build-tools;37.0.0，
+      # 脚本检测到就位会直接跳过安装。
       script: "set -e\nsh .cnb/scripts/ensure-sdk.sh\n"
     - name: 生成示例 payload dex
       # assets/sample/DemoDialog.dex 是「载入示例」功能的依赖，
@@ -130,7 +319,34 @@ v*:
     - name: 准备签名配置
       script: "if [ -n \"$KEYSTORE_BASE64\" ]; then\n  echo \"$KEYSTORE_BASE64\" | base64 -d > release.keystore\n  { echo \"storeFile=release.keystore\"; echo \"storePassword=$KEYSTORE_STORE_PASSWORD\"; echo \"keyAlias=$KEYSTORE_KEY_ALIAS\"; echo \"keyPassword=$KEYSTORE_KEY_PASSWORD\"; } > release.properties\n  echo \"✔ 已使用 Secrets 中的签名密钥\"\nelse\n  echo \"❌ 标签发布必须配置 KEYSTORE_BASE64，否则无法签名\"; exit 1\nfi\n"
     - name: 执行打包
-      script: "sh .cnb/scripts/gradle-build.sh\n"
+      # 用缓存镜像而非基础镜像：它预装了 SDK 37 + build-tools 37.0.0，
+      # 否则每次都要现场 sdkmanager 下载（/opt 下，任何 volume 都缓存不到）。
+      #
+      # ⚠️ 本阶段跑在独立容器里，取不到上一 stage 写在 /tmp/cnb/vars.sh 的变量
+      #    （/tmp 不跨容器）。故这里按同一规则重算 GRADLE_TASK 并重建 vars.sh。
+      #    规则与「确定打包类型」stage 必须保持一致。
+      image: $GRADLE_CACHE_IMAGE
+      env:
+        # 指向 docker.volumes 挂载点：同节点重复构建时复用依赖与 build-cache
+        GRADLE_USER_HOME: /workspace/.gradle-home
+      script: |
+        set -e
+        # 缓存镜像的 WORKDIR 是 /space（只放依赖清单），仓库代码挂在 /workspace。
+        cd /workspace
+        mkdir -p /tmp/cnb
+        sh .cnb/scripts/resolve-version.sh
+        if [ "$CNB_IS_TAG" = "true" ] || [ "$build_type" = "正式版(release)" ]; then
+          GRADLE_TASK="assembleRelease"; PKG_TYPE="正式版"
+        elif [ "$build_type" = "全部(both)" ]; then
+          GRADLE_TASK="assembleDebug assembleRelease"; PKG_TYPE="全部"
+        else
+          GRADLE_TASK="assembleDebug"; PKG_TYPE="测试版"
+        fi
+        echo "GRADLE_TASK='$GRADLE_TASK'" >> /tmp/cnb/vars.sh
+        echo "PKG_TYPE='$PKG_TYPE'" >> /tmp/cnb/vars.sh
+        echo "log_level='$log_level'" >> /tmp/cnb/vars.sh
+        echo "打包任务=$GRADLE_TASK"
+        sh .cnb/scripts/gradle-build.sh
     - name: 整理 APK
       script: "[ -f /tmp/cnb/vars.sh ] && . /tmp/cnb/vars.sh\nset -e\nmkdir -p dist\nSHA=$(git rev-parse --short HEAD); DATE=$(date +%Y%m%d-%H%M)\ncp app/build/outputs/apk/release/*.apk \"dist/ApkForge-正式版-v${VERSION_NAME}_${VERSION_CODE}-${DATE}-${SHA}.apk\"\nsha256sum dist/*.apk > dist/checksums.txt\nls -lh dist/\n"
     - name: 上传 APK 到附件
@@ -143,7 +359,7 @@ v*:
         ttl: 7
     - name: 收集构建日志
       if: always()
-      script: "mkdir -p build-log/daemon\ncp -f \"$HOME\"/.gradle/daemon/*/*.out.log build-log/daemon/ 2>/dev/null || true\n{ echo \"# Gradle 守护进程日志\"; for f in build-log/daemon/*.out.log; do [ -e \"$f\" ] || continue; echo \"===== $(basename \"$f\") =====\"; tail -n 2000 \"$f\"; done; } > build-log/gradle-daemon.log 2>/dev/null || true\n[ -s build-log/gradle-daemon.log ] || echo \"无 daemon 日志\" > build-log/gradle-daemon.log\n"
+      script: "mkdir -p build-log/daemon\nfor d in /workspace/.gradle-home/daemon \"$HOME\"/.gradle/daemon; do cp -f \"$d\"/*/*.out.log build-log/daemon/ 2>/dev/null || true; done\n{ echo \"# Gradle 守护进程日志\"; for f in build-log/daemon/*.out.log; do [ -e \"$f\" ] || continue; echo \"===== $(basename \"$f\") =====\"; tail -n 2000 \"$f\"; done; } > build-log/gradle-daemon.log 2>/dev/null || true\n[ -s build-log/gradle-daemon.log ] || echo \"无 daemon 日志\" > build-log/gradle-daemon.log\n"
     - name: 上传构建日志到附件
       if: always()
       image: cnbcool/attachments:latest

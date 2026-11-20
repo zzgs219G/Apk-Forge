@@ -96,10 +96,13 @@ platform_ready() {
   return 1
 }
 
-# build-tools 也要看一眼：示例 dex 生成要用 d8，
-# 平台在但 build-tools 是空的镜像照样跑不完流水线。
+# build-tools 也要看一眼：示例 dex 生成要用 d8。
+# ⚠️ 不能「有任意 d8 就算就绪」：镜像自带 build-tools 36.1.0，那个 d8 存在，
+#    会让本函数提前返回成功，从而跳过 build-tools;37.0.0 的安装；
+#    而下面第 8 步的复核又会通过，形成「以为装好了其实没装」的假象。
+#    这里按 compileSdk 的次版本号严格匹配（37.0.0 / 37.x.y 都算）。
 build_tools_ready() {
-  for d in "$SDK"/build-tools/*/d8; do
+  for d in "$SDK"/build-tools/"$COMPILE_SDK".*/d8; do
     [ -x "$d" ] && return 0
   done
   return 1

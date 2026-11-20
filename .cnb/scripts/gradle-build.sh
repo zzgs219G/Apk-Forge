@@ -45,11 +45,24 @@ mkdir -p build-log
 FLAGS=""
 [ "${log_level:-}" = "详细模式" ] && FLAGS="--info --warning-mode all"
 
+# ── JVM 堆按容器内存自适应 ──
+# CNB 的 runner 内存 = cpus × 2 GiB（官方文档 grammar.md#pipeline-cpus）。
+# 写死 -Xmx4g + MaxMetaspaceSize=1g 在 4 核（8 GiB）容器里已占 5 GiB，
+# 加上 Kotlin 编译子进程 / AGP worker / R8 会被 OOM Killer 杀掉
+# （表现是构建莫名失败、日志里没有 Java 异常，只有 daemon disappeared）。
+# 取 45% 给堆、15% 给 Metaspace，其余留给其它进程。
+MEM_MB=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 4096)
+HEAP_MB=$(( MEM_MB * 45 / 100 ))
+[ "$HEAP_MB" -lt 1024 ] && HEAP_MB=1024     # 低于 1g 无法编译
+META_MB=$(( MEM_MB * 15 / 100 ))
+[ "$META_MB" -lt 512 ] && META_MB=512
+echo "容器内存 ${MEM_MB}MB → Gradle 堆 ${HEAP_MB}MB / Metaspace ${META_MB}MB"
+
 # 全部模式时 GRADLE_TASK 含两个任务（assembleDebug assembleRelease），
 # 不能加引号——需按空格分词传给 gradlew
 # shellcheck disable=SC2086
 ( ./gradlew ${GRADLE_TASK:-assembleDebug} \
-    -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8" \
+    -Dorg.gradle.jvmargs="-Xmx${HEAP_MB}m -XX:MaxMetaspaceSize=${META_MB}m -Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8" \
     --configuration-cache --stacktrace --console=plain --build-cache $FLAGS \
     2>&1
   # 子 shell 里捕获 gradle 的退出码（含被信号杀死时的 128+N），落盘给外层读
