@@ -1,8 +1,19 @@
 # ApkForge
 
-本地 APK dex 注入工具（Android 端，无需电脑）。
+本地 APK 处理工具（Android 端，无需电脑）。两个功能并列：
 
-选一个 APK，把 smali 调用插进它的生命周期方法，附带的 payload dex 一起打进包，产物写到 `Download/ApkForge/`。
+| 功能 | 做什么 | 文档 |
+|---|---|---|
+| **dex 注入** | 把 smali 调用插进目标 APK 的生命周期方法，payload dex 一起打进包 | 本文 |
+| **去签名校验** | 让目标 App 认为自己的签名还是原版 | [`docs/去签名校验.md`](docs/去签名校验.md) |
+
+两者产物都写到 `Download/ApkForge/`，**都是未签名 APK**，自己用 keystore 签。
+
+---
+
+## 功能一：dex 注入
+
+选一个 APK，把 smali 调用插进它的生命周期方法，附带的 payload dex 一起打进包。
 支持单包注入、目录批量注入，以及自己捏一份弹窗载荷（改文案 → 导出 dex + 配置）。
 
 ---
@@ -37,6 +48,30 @@
 ```
 
 **不做**的事情：不重签名、不解码 Manifest 成文本、不脱壳（但会识别加固包并说清原因）。
+
+---
+
+## 功能二：去签名校验
+
+有些 App 会检查自己的签名，签名一变就弹警告或拒绝启动（改过包的都会遇到）。
+这个功能让它认为签名没变过。
+
+```
+选 APK ──▶ 提取原证书指纹 ──▶ 改写 AndroidManifest（android:name 指向我们的壳）
+       ──▶ 追加 classes{N+1}.dex（引导器）+ assets 载荷
+       ──▶ Download/ApkForge/xxx_unchecked.apk（未签名）
+```
+
+**原理**：不改目标 App 的任何代码，只让「系统告诉它签名是什么」这一步返回原版证书。
+所以它用什么方式写校验、怎么混淆都不影响。
+
+**能绕过**：通过 `PackageManager` 查签名的一切方式
+（`signatures` / `signingInfo` / `checkSignatures` / `getPackageArchiveInfo`）。
+
+**绕不过**：App 自读 APK 文件算哈希、native 层（`.so`）校验、
+上报服务端裁决 / Play Integrity。
+
+详见 [`docs/去签名校验.md`](docs/去签名校验.md)。
 
 **native 的 onCreate** 会挡路（加固壳 / `NativeActivity` 常见）。这时自动按
 `onPostCreate` → `onStart` → `onResume` → `attachBaseContext` 的顺序换点，并把原因写在界面上。

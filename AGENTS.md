@@ -12,7 +12,11 @@
 单测全部基于真实 APK，**在 GitHub Actions 上跑**（本地跑会占满手机内存）
 4 种注入模式、批量注入、可自造弹窗载荷（payload/）
 无重签名、不处理加固包的业务逻辑、只支持 arm64-v8a
+另有【去签名校验】功能：绕过目标 App 的签名校验（见 docs/去签名校验.md）
 ```
+
+> ⚠️ 「dex 注入」与「去签名校验」是**并列的两条线**，不要混读文档。
+> 前者改行为（插 invoke-static），后者改环境（改 android:name + 塞载荷）。
 
 **注入性能（28.5MB / 16722 类的 release dex，手机实测）**：
 
@@ -38,7 +42,8 @@ com.xixin.apkforge
 ├── MainActivity.kt              只挂 AppRoot
 
 ├── core/                        ★ 纯 JVM，禁止依赖 Android API
-│   ├── axml/AxmlManifest        二进制 AXML 解析
+│   ├── axml/AxmlManifest        二进制 AXML 解析（只读）
+│   ├── axml/AxmlEditor          二进制 AXML 改写（只写；见 §11 的两个致命细节）
 │   ├── dex/SmaliCallParser      smali invoke 行 → 结构化
 │   ├── dex/ClassInspector       探测类方法/父类
 │   ├── dex/DexOpcodes           从文件头读 dex 版本，给出解析/写出共用的 Opcodes
@@ -51,7 +56,11 @@ com.xixin.apkforge
 │   ├── dex/SamplePayload        示例载荷常量（调用行 + asset 路径）
 │   ├── dex/patch/               ★★★ 增量注入层（快路径），见 §10 专章
 │   ├── apk/ApkRepackager        zip 重打包（替换 dex + 追加 payload + 保对齐 + 字节级进度）
-│   └── apk/ApkInjectPipeline    流水线编排（Stage 权重 + Step 里程碑 + onTick 高频状态）
+│   ├── apk/ApkInjectPipeline    dex 注入流水线（Stage 权重 + Step 里程碑 + onTick 高频状态）
+│   └── uncheck/                 ★ 去签名校验（另一条线，见 docs/去签名校验.md）
+│       ├── CertExtractor        从 APK Signing Block 提取原证书 DER（纯 Java 解析）
+│       ├── PayloadRepo          载荷下载 + sha256 校验 + 按版本缓存
+│       └── UncheckPipeline      六步主流程（读包→取载荷→改Manifest→组装→自检）
 
 ├── data/                        持久化与平台 IO（需要 Context）
 │   ├── ConfigStore              JSON 配置存储（调用行 + 载荷 + 模式 + 资产）
@@ -66,7 +75,8 @@ com.xixin.apkforge
 │   ├── console/ConsoleViewModel  控制台唯一 VM：选包 → 配置 → 执行 → 记录
 │   ├── config/ConfigViewModel    配置页增删改查（与执行流程解耦）
 │   ├── batch/BatchViewModel      批量队列（与控制台生命周期不同，故分开）
-│   └── plugin/PluginViewModel    插件包：造载荷、导出 zip、建配置
+│   ├── plugin/PluginViewModel    插件包：造载荷、导出 zip、建配置
+│   └── uncheck/UncheckViewModel  去签名校验：选包 → 取载荷 → 跑流水线 → 报结果
 
 └── ui/
     ├── AppRoot                  侧边栏 + NavHost（★ 在此持有共享 VM）
@@ -78,6 +88,7 @@ com.xixin.apkforge
     │   └── m3e/                 M3E 语义动画 + 波浪进度
     ├── anim/                    六边形注入动画 + SVG path 解析
     ├── screen/console/          控制台（当前任务卡 + 记录 + 贴底主操作栏）
+    ├── screen/uncheck/          去签名校验页（含日志面板，一键复制）
     ├── screen/setup/            注入配置（配置 / 类名 / 注入点 / 模式 / 调用清单）
     ├── screen/run/              运行（单行实时日志 + 结果卡）
     ├── screen/batch/            批量注入（目录 → 队列）
@@ -638,3 +649,74 @@ gh workflow run build-apk.yml --repo zzgs219G/Apk-Forge \
   -f build_type="全部(both)" -f version_code="0.5.0" -f run_tests="跳过测试"
 gh run download <id> -D dist
 ```
+
+---
+
+## 11. 去签名校验模块（`core/uncheck/` + `core/axml/AxmlEditor`）
+
+> 完整背景见 **`docs/去签名校验.md`**。本节只列「改之前必须知道」的硬约束。
+
+### 11.1 AXML 改写的两条红线（改错了零报错，但完全不生效）
+
+| 红线 | 为什么 | 怎么验 |
+|---|---|---|
+| **属性必须按 resourceId 升序插入，不能追加末尾** | `PackageParser` 按 framework 资源 ID 升序读 `<application>`，遇乱序**提前停止扫描**。`android:name` 的 ID 是 `0x01010003`（最小）→ 必须插最前 | 与 MT 生成的包逐字节 diff 属性数组 |
+| **`rawValue` 必须是字符串池索引，不是 `NO_INDEX`** | `raw` 与 `typedValue.data` 都要填索引且相同；写 `NO_INDEX` 时值和属性名都读不出 | androguard 交叉验证 + `dumpsys package` 看 className |
+
+**症状统一**：系统读不到 `android:name`、App 照旧跑原类、**日志里一条我们的都没有**。
+
+**只验「自己的读函数能读出自己写的结果」不够** —— 那是自洽检查，两边错得一样时测不出来。
+必须有：① 独立实现（androguard）交叉验证 ② 装机后 `dumpsys package` 看 `className`。
+
+### 11.2 载荷必须分两个 dex，不能合并
+
+```
+boot.dex      SigFix + SigFixApp  → 进目标 App 的 classes{N+1}.dex
+payload.dex   SigFixImpl           → 进 assets，运行时 new DexFile(path) 加载
+```
+
+`SigFixImpl` 必须由 **BootClassLoader** 加载才能反射访问 hidden API。
+编进 App 自己的 dex → 应用域 → 反射被拦（实测 Android 17：
+`setHiddenApiExemptions` 直接 blocked）。**合并两个 dex 会让整个方案失效。**
+
+### 11.3 载荷类里禁止读静态字段
+
+`SigFixImpl$IpmHandler` / `$PackageInfoCreator` 会被 `handlerLoader`
+重新加载成**另一个 Class 副本**，静态字段在副本之间不共享。
+
+实测日志：`sFake=false sTargetPkg=null` —— 所有改写被 null 检查挡掉，
+表现为「代理被调用 29 次，改写 0 次」。
+
+**规则：handler 需要的数据一律经构造器传入。**
+
+### 11.4 载荷要「下载」不是「内置」，且必须校验 sha256
+
+载荷会被**注入到别人的 App 里执行**。跳 sha256 校验 = 信任整条网络链路。
+`PayloadRepo` 里校验不过直接丢弃，不许「先用着再说」。
+
+### 11.5 每一步都必须兜住异常，不许往上抛
+
+目标 App 千奇百怪，我们的假设随时会错。
+
+```
+MT 的实现在简盒 v2.1.2 上：
+  IllegalAccessException（改 static final 字段被拒）
+  → 抛 RuntimeException
+  → ExceptionInInitializerError
+  → App 在 makeApplicationInner 阶段就崩
+我们的实现同一条异常：
+  → 记日志 → 代理层继续兜 → App 正常启动
+```
+
+**崩了等于这个模块不可用**（用户装一个坏包到自己手机上）。
+`SigFixApp` 里尤其严禁抛异常 —— 它在 Application 初始化路径上，抛了必崩。
+
+### 11.6 界面禁用必须给可见原因
+
+`UncheckUiState.blockers` 是唯一判据来源，UI 照它说事，**不要在各处重复判断**
+（两处必然漂移）。
+
+### 11.7 与 dex 注入的关系
+
+**不共用 `DexCallInjector`**。去校验只改 Manifest，不插 `invoke-static`。
+两条线唯一的共同点是「都产出未签名 APK」。
