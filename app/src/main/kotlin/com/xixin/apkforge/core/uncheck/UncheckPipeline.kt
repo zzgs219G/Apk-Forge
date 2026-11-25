@@ -67,6 +67,9 @@ object UncheckPipeline {
     /** android:extractNativeLibs 的 framework 资源 ID */
     private const val ATTR_EXTRACT_NATIVE_LIBS = 0x010104EA.toInt()
 
+    /** ZIP local file header 固定部分长度（30 字节）。 */
+    private const val LOCAL_HEADER_SIZE = 30
+
     class PipelineException(message: String, cause: Throwable? = null) :
         Exception(message, cause)
 
@@ -239,7 +242,7 @@ object UncheckPipeline {
                     )
                 )
             }
-            buildIntermediate(input, intermediate, newManifest, extra)
+            buildIntermediate(input, intermediate, newManifest, extra, sourceLayout)
             progress.on("中间包", "${intermediate.length()} 字节，+${extra.size} 个条目")
 
             // ── ⑦ 注入签名块 ──────────────────────────────────
@@ -304,27 +307,46 @@ object UncheckPipeline {
     /**
      * 建中间包：原包逐条复制 + 替换 Manifest + 追加额外条目。
      *
-     * ## 为什么逐条复制而不是直接改原包
+     * ## 为什么必须自己算对齐（这里踩过一次真 bug）
      *
-     * 原包的条目数据是一个整体字节流，改一个条目就要重排所有 offset。
-     * 用 `ZipOutputStream` 重写是唯一不依赖外部工具的做法 —— 代价是
-     * **签名块会丢**（它不是一个条目），所以调用方必须在之后补注（步骤 ⑦）。
+     * `java.util.zip.ZipEntry(name)` **只搬名字**，extra field 会被丢掉 ——
+     * 而 AGP 正是把对齐填充塞在 extra 里的。丢掉之后所有 STORED 条目的
+     * 数据偏移都会前移，`resources.arsc` 从 `off%4=0` 变成别的值。
      *
-     * ## STORED 条目必须显式给 size/crc
+     * ⚠️ 曾经的错误推理：以为「中间包不用对齐，因为后续 [ZipReuse] 的
+     * 平移量是 4096 的倍数，会保留原对齐」。这个推理只对「平移」成立，
+     * 前提是**中间包自身已经对齐**；而重建中间包时 extra 一丢，中间包里
+     * 就已经错位了，平移 4096 的倍数救不回来。
      *
-     * `ZipOutputStream` 对 STORED 条目要求预先知道大小与 CRC，不给会抛
-     * `invalid entry size`。而 APK 里大量资源（res/ 下的图、resources.arsc）
-     * 本来就是 STORED —— 照搬 method 却不给这两项，会在写到第一个未压缩
-     * 条目时失败，产物只剩几百字节残壳，且异常信息与「压缩」毫无关联。
+     * 症状（debug 包碰巧躲过，release 包必炸）：
+     * ```
+     * resources.arsc 未 4 字节对齐（dataOffset=19120351, mod4=3）
+     * Failed parse during installPackageLI: Targeting R+ (version 30 and above)
+     * requires the resources.arsc of installed APKs to be stored uncompressed
+     * and aligned on a 4-byte boundary
+     * ```
+     *
+     * 所以这里照 [com.xixin.apkforge.core.apk.ApkRepackager] 的做法：
+     * 用 [CountingOutputStream] 拿真实写入位置，按源包反推的对齐要求补
+     * extra 填充。**不写死「哪些条目要几字节对齐」的表** —— 那张表永远
+     * 比现实少几项，且漏项时不报错（`踩坑记录` 坑 5：白名单是负债）。
      */
     private fun buildIntermediate(
         source: File,
         target: File,
         newManifest: ByteArray,
         extra: List<ZipReuse.ExtraEntry>,
+        sourceLayout: ZipCentralDirectory.Layout,
     ) {
+        // 新增条目的对齐：dex 跟随包里已有 dex，.so 用页对齐
+        val dexAlign = sourceLayout.entries
+            .filter { it.isDex && it.isStored }
+            .map { alignmentOf(it.dataOffset) }
+            .maxOrNull() ?: 4
+
         ZipFile(source).use { zin ->
-            ZipOutputStream(target.outputStream().buffered()).use { zout ->
+            val counter = CountingOutputStream(target.outputStream().buffered())
+            ZipOutputStream(counter).use { zout ->
                 for (entry in zin.entries()) {
                     if (entry.isDirectory) {
                         zout.putNextEntry(ZipEntry(entry.name).apply { time = entry.time })
@@ -335,39 +357,47 @@ object UncheckPipeline {
                         UncheckPayload.MANIFEST -> newManifest
                         else -> zin.getInputStream(entry).use { it.readBytes() }
                     }
-                    writeEntry(zout, entry, data)
+                    val srcEntry = sourceLayout.byName(entry.name)
+                    val align = when {
+                        // Manifest 被改写后长度变了，沿用它原来的对齐没意义
+                        entry.name == UncheckPayload.MANIFEST -> 1
+                        srcEntry == null -> 1
+                        else -> alignmentOf(srcEntry.dataOffset)
+                    }
+                    writeEntry(zout, entry, data, align, counter.count)
                 }
 
                 for (x in extra) {
+                    val align = when {
+                        x.name.endsWith(".so") -> 16384   // 页对齐，兼容 16KB 页设备
+                        x.name.endsWith(".dex") -> dexAlign
+                        else -> 1
+                    }
                     val e = ZipEntry(x.name).apply {
                         method = if (x.method == ZipCentralDirectory.METHOD_STORED) ZipEntry.STORED
                         else ZipEntry.DEFLATED
                         time = 0L    // 固定时间戳，让同输入产出稳定
                     }
-                    writeEntry(zout, e, x.data)
+                    writeEntry(zout, e, x.data, align, counter.count)
                 }
             }
         }
     }
 
     /**
-     * 写一个条目。
+     * 写一个条目，必要时补 extra 对齐填充。
      *
-     * ## 为什么这里**不**做对齐补 extra
-     *
-     * 第一版试图给 STORED 条目补 extra 对齐，但 `ZipOutputStream` 不暴露
-     * 「当前写到哪里」，只能拿到 `30 + nameLen` 这个**相对值**，算不出绝对
-     * 偏移 → 补出来的 extra 长度是错的。
-     *
-     * 真正保证对齐的是后面的 [ZipReuse]：它把 origin 的 header 补到 4096，
-     * **平移量是 4096 的倍数**，所以中间包里「已经对齐的条目」平移到产物后
-     * 依然对齐。中间包自身不需要额外对齐 —— 我们只要求它**不破坏**原包的
-     * 相对布局，而逐条原样拷贝（保留 method 与 extra）正好满足。
-     *
-     * 产物最终是否真的对齐，由 [ZipReuse.verify] 的 `resources.arsc`
-     * 判据兜底检查，装不上会在这里被拦住，而不是留给用户试装。
+     * @param wireOffset 该条目的 local header 即将写入的位置（= 当前输出字节数）。
+     *   数据偏移 = wireOffset + 30 + nameLen + extraLen，对齐只能靠调 extra 长度。
      */
-    private fun writeEntry(zout: ZipOutputStream, src: ZipEntry, data: ByteArray) {
+    private fun writeEntry(
+        zout: ZipOutputStream,
+        src: ZipEntry,
+        data: ByteArray,
+        align: Int,
+        wireOffset: Long,
+    ) {
+        val nameLen = src.name.toByteArray(Charsets.UTF_8).size
         val e = ZipEntry(src.name).apply {
             time = src.time
             method = if (src.method == ZipEntry.STORED) ZipEntry.STORED else ZipEntry.DEFLATED
@@ -378,9 +408,47 @@ object UncheckPipeline {
                 crc = java.util.zip.CRC32().apply { update(data) }.value
             }
         }
+        if (e.method == ZipEntry.STORED && align > 1) {
+            val pad = paddingFor(wireOffset + LOCAL_HEADER_SIZE + nameLen, align)
+            // 裸 0 填充，与 AGP 一致（`zipalign -c` 认这种形态）
+            if (pad > 0) e.extra = ByteArray(pad)
+        }
         zout.putNextEntry(e)
         zout.write(data)
         zout.closeEntry()
+    }
+
+    /** 让 `base + pad` 落到 [align] 的整数倍上；[align] <= 1 表示不要求对齐。 */
+    private fun paddingFor(base: Long, align: Int): Int {
+        if (align <= 1) return 0
+        val mod = (base % align).toInt()
+        return if (mod == 0) 0 else align - mod
+    }
+
+    /** 用**源包**的数据偏移反推该条目原本的对齐要求。 */
+    private fun alignmentOf(offset: Long): Int = when {
+        offset % 16384L == 0L -> 16384
+        offset % 4096L == 0L -> 4096
+        offset % 4L == 0L -> 4
+        else -> 1
+    }
+
+    /** 单纯数字节，`ZipOutputStream` 不给位置，而对齐必须知道位置。 */
+    private class CountingOutputStream(private val inner: java.io.OutputStream) :
+        java.io.OutputStream() {
+        var count: Long = 0L
+            private set
+
+        override fun write(b: Int) {
+            inner.write(b); count++
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            inner.write(b, off, len); count += len
+        }
+
+        override fun flush() = inner.flush()
+        override fun close() = inner.close()
     }
 
     // ── 自检 ──────────────────────────────────────────────────
