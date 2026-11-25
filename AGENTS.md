@@ -44,6 +44,7 @@ com.xixin.apkforge
 ├── core/                        ★ 纯 JVM，禁止依赖 Android API
 │   ├── axml/AxmlManifest        二进制 AXML 解析（只读）
 │   ├── axml/AxmlEditor          二进制 AXML 改写（只写；见 §11 的两个致命细节）
+│   ├── axml/AxmlBoolean         布尔属性原位改写（extractNativeLibs；属性不存在时新增）
 │   ├── dex/SmaliCallParser      smali invoke 行 → 结构化
 │   ├── dex/ClassInspector       探测类方法/父类
 │   ├── dex/DexOpcodes           从文件头读 dex 版本，给出解析/写出共用的 Opcodes
@@ -56,11 +57,14 @@ com.xixin.apkforge
 │   ├── dex/SamplePayload        示例载荷常量（调用行 + asset 路径）
 │   ├── dex/patch/               ★★★ 增量注入层（快路径），见 §10 专章
 │   ├── apk/ApkRepackager        zip 重打包（替换 dex + 追加 payload + 保对齐 + 字节级进度）
+│   ├── apk/ZipCentralDirectory  ZIP 中央目录解析（条目全元数据，数据复用要用）
+│   ├── apk/ApkSigningBlock      APK Signing Block 的提取与注入（去校验要搬它）
 │   ├── apk/ApkInjectPipeline    dex 注入流水线（Stage 权重 + Step 里程碑 + onTick 高频状态）
 │   └── uncheck/                 ★ 去签名校验（另一条线，见 docs/去签名校验.md）
 │       ├── CertExtractor        从 APK Signing Block 提取原证书 DER（纯 Java 解析）
-│       ├── PayloadRepo          载荷下载 + sha256 校验 + 按版本缓存
-│       └── UncheckPipeline      六步主流程（读包→取载荷→改Manifest→组装→自检）
+│       ├── UncheckPayload       载荷模型 + index.json 解析 + sha256 校验 + 落点常量
+│       ├── ZipReuse             数据复用：origin.apk 与整包共享物理字节
+│       └── UncheckPipeline      九步主流程（读包→取载荷→改Manifest→组装→注签名块→复用→自检）
 
 ├── data/                        持久化与平台 IO（需要 Context）
 │   ├── ConfigStore              JSON 配置存储（调用行 + 载荷 + 模式 + 资产）
@@ -69,6 +73,7 @@ com.xixin.apkforge
 │   ├── ApkMeta                  PackageManager 读应用名/图标/包名
 │   ├── ApkFolderScanner         目录树递归扫 .apk（批量注入用）
 │   ├── PluginPack               弹窗载荷三件套：表单 ↔ JSONC ↔ zip
+│   ├── uncheck/PayloadFetcher   去校验载荷下载 + 缓存（唯一碰 Context 的地方）
 │   └── FilePicker               MT 优先的文件/目录选择
 
 ├── feature/
@@ -138,6 +143,13 @@ app/src/test/kotlin/com/xixin/apkforge/
 ├── core/dex/PackIntegrityTest     4 例  正常包不误报、加密/大小不符能识别、部分坏不拦
 ├── core/dex/PluginPayloadTest     9 例  调用行 ↔ 载荷 dex 契约、占位符唯一、烘焙往返、7.0 兼容
 ├── core/dex/SamplePayloadTest     2 例
+├── core/apk/ZipCentralDirectoryTest — 被下面几个间接覆盖
+├── core/apk/ApkSigningBlockTest   5 例  提取/注入/幂等/未签名包返回 null/重写会丢（反向说明）
+├── core/axml/AxmlBooleanTest      7 例  false→true 原位、幂等、不存在时新增、resourceId 升序、rawValue=NO_INDEX
+├── core/uncheck/UncheckPayloadTest      13 例  sha256 标准向量、索引解析、缺文件/格式错、魔数与大小校验、落点常量契约
+├── core/uncheck/ZipReuseTest            10 例  体积不翻倍、origin 是完整 APK、arsc 对齐、LFH↔CD extra 一致、标准 ZipFile 交叉验证
+├── core/uncheck/UncheckAssemblyOrderTest 6 例  真实 APK 的组装顺序：签名块保留、错序会丢、复用在位
+├── core/uncheck/UncheckPipelineTest      9 例  七落点齐全、原包条目一条不少、只多预期条目、自检、复用体积
 └── support/TestIo                 测试专用 IO 封装
 
 payload/dialog/                   弹窗载荷源码（Java，零依赖）
@@ -692,9 +704,70 @@ payload.dex   SigFixImpl           → 进 assets，运行时 new DexFile(path) 
 ### 11.4 载荷要「下载」不是「内置」，且必须校验 sha256
 
 载荷会被**注入到别人的 App 里执行**。跳 sha256 校验 = 信任整条网络链路。
-`PayloadRepo` 里校验不过直接丢弃，不许「先用着再说」。
+`PayloadFetcher` 里校验不过直接丢弃，不许「先用着再说」。
 
-### 11.5 每一步都必须兜住异常，不许往上抛
+**四个文件缺一不可**（`UncheckPayload.REQUIRED` 把它们都设为必需）：
+
+```
+boot.dex            → 目标包 classes{N+1}.dex（SigFix + SigFixApp）
+payload.dex         → assets/nc_sigfix/payload.dex（SigFixImpl）
+libusign_arm64.so   → lib/arm64-v8a/libusign.so
+libusign_armv7.so   → lib/armeabi-v7a/libusign.so
+```
+
+少 `.so` 只剩 Java 层，而 Java 层对「App 自读 APK / native 读签名块」
+完全无效 —— 现代 App 普遍至少做其中一个。所以缺 `.so` 直接报错，
+不产出「装上去才发现没效果」的索引。
+
+### 11.5 数据复用的三条红线（违反即「装不上」或「体积翻倍」）
+
+`core/uncheck/ZipReuse` 手写 ZIP 让 `origin.apk` 与整包共享物理字节。
+它绕开了 `java.util.zip`，代价是必须自己保证布局合法：
+
+| 红线 | 违反后果 |
+|---|---|
+| origin 的 local header 必须补到 **4096** | 平移量不是 4 的倍数 → `resources.arsc` 失去对齐 → **Android R+ 装机直接拒** |
+| LFH 与**中央目录**的 extra 长度必须一致 | 读取方从 CD 拿 `extraLen=0` → 实际平移量恢复原值 → 等于没对齐（且静默） |
+| 产物之后**绝不能**再跑 apksigner / zipalign | 它们重写 ZIP，把重叠条目展开成两份 → 体积从 1× 变 2× |
+
+**签名提示必须写进 UI**：产物只能用「手写 ZIP」的工具签（如 MT 管理器）。
+这不是可选建议 —— apksigner 一跑，复用就白做了。
+
+### 11.6 签名块必须在「中间包之后、数据复用之前」注入
+
+```
+rebuild 中间包 → 注入签名块 → 数据复用 → 输出
+                      ↑ 必须在①②之间
+```
+
+- 在 rebuild **之前**注入 → `ZipOutputStream` 重写整个 ZIP，签名块不是条目，
+  必被丢弃。
+- 在复用**之后**注入 → `origin.apk` 的数据区已经固定，改不到了。
+
+云端 2026-11-24 就是漏了这一步：加固包的 `.ncx` 段解密出乱码 → 跳野地址
+→ **SIGBUS**。`UncheckPipeline` 的自检直接查「原包有签名块时 origin.apk
+里也必须带」，`UncheckAssemblyOrderTest` 再钉一遍顺序。
+
+### 11.7 与 dex 注入的关系
+
+**不共用 `DexCallInjector`**。去校验只改 Manifest，不插 `invoke-static`。
+两条线唯一的共同点是「都产出未签名 APK」。
+
+### 11.8 `core/uncheck/` 必须能跑 JVM 单测
+
+这个模块的失败形态**全是「不报错」**：
+
+```
+Manifest 改错          → 系统读不到 android:name → App 照旧跑原类
+签名块没搬             → native 层读不到证书 → 静默只剩 Java 层
+extractNativeLibs 没改 → .so 不解压 → System.load 失败但不崩
+数据复用对齐错         → 装机被拒（这个还算好的，至少有报错）
+```
+
+所以 `core/uncheck/` 不许出现 `android.*`。下载/缓存这类必须碰 Context 的
+逻辑一律放 `data/uncheck/PayloadFetcher`。
+
+### 11.9 每一步都必须兜住异常，不许往上抛
 
 目标 App 千奇百怪，我们的假设随时会错。
 
@@ -711,12 +784,7 @@ MT 的实现在简盒 v2.1.2 上：
 **崩了等于这个模块不可用**（用户装一个坏包到自己手机上）。
 `SigFixApp` 里尤其严禁抛异常 —— 它在 Application 初始化路径上，抛了必崩。
 
-### 11.6 界面禁用必须给可见原因
+### 11.10 界面禁用必须给可见原因
 
 `UncheckUiState.blockers` 是唯一判据来源，UI 照它说事，**不要在各处重复判断**
 （两处必然漂移）。
-
-### 11.7 与 dex 注入的关系
-
-**不共用 `DexCallInjector`**。去校验只改 Manifest，不插 `invoke-static`。
-两条线唯一的共同点是「都产出未签名 APK」。
