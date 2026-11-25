@@ -105,8 +105,8 @@ fun UncheckScreen(
             ui.error?.let { err ->
                 item { ErrorCard(err, onDismiss = vm::clearError) }
             }
-            ui.lastOutput?.let { out ->
-                item { SuccessCard(ui, path = out.absolutePath) }
+            ui.lastResult?.let { result ->
+                item { SuccessCard(ui, result) }
             }
             item { RunCard(ui, onRun = vm::run) }
 
@@ -237,7 +237,7 @@ private fun ErrorCard(message: String, onDismiss: () -> Unit) {
 }
 
 @Composable
-private fun SuccessCard(ui: UncheckUiState, path: String) {
+private fun SuccessCard(ui: UncheckUiState, result: com.xixin.apkforge.core.uncheck.UncheckPipeline.Result) {
     SectionCard(
         title = "完成",
         subtitle = "产物未签名 —— 请用你自己的 keystore 签",
@@ -245,7 +245,7 @@ private fun SuccessCard(ui: UncheckUiState, path: String) {
     ) {
         Column(Modifier.padding(top = 4.dp)) {
             Text(
-                path,
+                result.output.absolutePath,
                 style = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
             )
@@ -257,6 +257,16 @@ private fun SuccessCard(ui: UncheckUiState, path: String) {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            Spacer(Modifier.height(10.dp))
+            // 数据复用包只能用「手写 ZIP」的工具签 —— 这条必须说清楚。
+            // apksigner 会展开重叠条目，体积从 1× 变 2×，复用白做。
+            Text(
+                "签名注意：本产物用了数据复用（origin.apk 与整包共享字节）。\n" +
+                    "请不要用 apksigner / 命令行 zipalign —— 它们会重写 ZIP，" +
+                    "把体积撑回两倍。用 MT 管理器之类的工具签。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
