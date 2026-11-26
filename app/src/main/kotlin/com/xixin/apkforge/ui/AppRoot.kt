@@ -41,6 +41,7 @@ import com.xixin.apkforge.ui.lifted.page.DrawerFooter
 import com.xixin.apkforge.ui.lifted.page.DrawerHeader
 import com.xixin.apkforge.ui.lifted.page.DrawerMenuItem
 import com.xixin.apkforge.feature.console.ConsoleViewModel
+import com.xixin.apkforge.feature.uncheck.UncheckViewModel
 import com.xixin.apkforge.ui.screen.ComingSoonScreen
 import com.xixin.apkforge.ui.screen.about.AboutScreen
 import com.xixin.apkforge.ui.screen.config.ConfigScreen
@@ -57,15 +58,23 @@ import kotlinx.coroutines.launch
 /**
  * 侧边栏入口。
  *
- * 「控制台」是本 App 的主场——所有注入动作都在它的两条子路由里发生
- * （`setup` 配置确认、`run` 执行）。侧边栏只放**平级的四类事**：
- * 干活（控制台）、攒素材（配置）、产物签名（待做）、看说明（关于）。
+ * 「控制台」是本 App 的主场——**选包只在这里发生**。选完包之后由用户挑做哪件事：
+ *
+ * ```
+ * 选包 → 弹模块选择 ┬─ dex 注入   → 注入配置 → 运行
+ *                  └─ 去签名校验 → 直接处理
+ * ```
+ *
+ * 「去签名校验」曾经是侧边栏里的一个独立上传页，那是错的：它和控制台做的是
+ * 同一件事（选 APK），却各自维护一套选择逻辑与空态。两个页面上传同一份文件，
+ * 用户还得记住"我上次是在哪选的"。现在它降级成控制台里的一个模块，
+ * 不再有独立的上传入口。
  */
 enum class AppDest(
     val route: String,
     val label: String,
     val icon: ImageVector,
-    /** 侧边栏是否展示。setup / run 是从控制台进去的子页，不在菜单里重复出现。 */
+    /** 侧边栏是否展示。setup / run / uncheck 都是控制台的子页，不在菜单里重复出现。 */
     val inMenu: Boolean = true,
 ) {
     CONSOLE("console", "控制台", Icons.Rounded.Terminal),
@@ -73,11 +82,12 @@ enum class AppDest(
     BATCH("batch", "批量", Icons.Rounded.Layers),
     PLUGIN("plugin", "插件包", Icons.Rounded.Extension),
     SIGN("sign", "签名", Icons.Rounded.VerifiedUser),
-    UNCHECK("uncheck", "去签名校验", Icons.Rounded.Security),
     ABOUT("about", "关于", Icons.Rounded.Info),
 
     SETUP("setup", "注入配置", Icons.Rounded.Tune, inMenu = false),
     RUN("run", "运行", Icons.Rounded.Terminal, inMenu = false),
+    /** 去签名校验：控制台的子页，继承控制台选好的包。 */
+    UNCHECK("uncheck", "去签名校验", Icons.Rounded.Security, inMenu = false),
     ;
 
     companion object {
@@ -118,6 +128,14 @@ fun AppRoot(
     batch: BatchViewModel = viewModel(),
     /** 插件包 VM：造载荷，与注入流程互不依赖。 */
     plugin: PluginViewModel = viewModel(),
+    /**
+     * 去签名校验的 VM。
+     *
+     * 与控制台同在 NavHost 之上取：它的输入来自控制台的「模块选择」，
+     * 若在子页里各自 `viewModel()`，owner 是 NavBackStackEntry，
+     * 控制台 setInput 的那份和页面读到的那份会是两个实例（坑 19）。
+     */
+    uncheck: UncheckViewModel = viewModel(),
 ) {
     val nav: NavHostController = rememberNavController()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
@@ -125,6 +143,20 @@ fun AppRoot(
 
     val backStack by nav.currentBackStackEntryAsState()
     val current = AppDest.of(backStack?.destination?.route)
+
+    /**
+     * 打开抽屉。
+     *
+     * ⚠️ **必须防重入**。原先每个页面都是 `onOpenDrawer = { scope.launch { drawerState.open() } }`，
+     * 连点三下就并发起三个协程抢同一个动画。`animate()` 各自以当时的 `offsetX`
+     * 为初值，多个动画交替写同一个状态，轻则抖动，重则把中间值写坏。
+     * 这里用 `isOpen` / `isAnimationRunning` 先判一次：已经在开/已开就直接返回，
+     * 不新建协程。所有页面共用这一个函数（原先 6 处各写一份）。
+     */
+    fun openDrawer() {
+        if (drawerState.isOpen || drawerState.isAnimationRunning) return
+        scope.launch { drawerState.open() }
+    }
 
     // NavHost 的四个 transition lambda 是非 @Composable 的，读不了 MaterialTheme，
     // 必须先在这里把 motionScheme 的规格取好（见 NavHost 处注释）。
@@ -139,7 +171,15 @@ fun AppRoot(
     val effectsEnter: FiniteAnimationSpec<Float> = motionScheme.defaultEffectsSpec()
     val effectsExit: FiniteAnimationSpec<Float> = motionScheme.fastEffectsSpec()
 
+    /**
+     * 切到**平级**入口。
+     *
+     * 只给侧边栏用：`popUpTo(CONSOLE)` 的前提是目标与栈底同级。
+     * 子页（setup / run / uncheck）一律走各自的 `openXxx()`，
+     * 否则会把它当成平级页压到栈底之上，返回语义就乱了。
+     */
     fun go(dest: AppDest) {
+        require(dest.inMenu) { "go() 只处理平级入口，${dest.route} 是子页，请用 openXxx()" }
         if (dest.route == backStack?.destination?.route) return
         nav.navigate(dest.route) {
             popUpTo(AppDest.CONSOLE.route) { inclusive = false; saveState = true }
@@ -151,6 +191,7 @@ fun AppRoot(
     fun openSetup() = nav.navigate(AppDest.SETUP.route) { launchSingleTop = true }
     fun openRun() = nav.navigate(AppDest.RUN.route) { launchSingleTop = true }
     fun openBatch() = nav.navigate(AppDest.BATCH.route) { launchSingleTop = true }
+    fun openUncheck() = nav.navigate(AppDest.UNCHECK.route) { launchSingleTop = true }
 
     /**
      * 推入配置页（不入栈 top 替换）。
@@ -176,10 +217,14 @@ fun AppRoot(
                 scope.launch { drawerState.close() }
                 val dest = AppDest.of(route)
                 backStack?.destination?.route?.let { from ->
-                    if (from == AppDest.SETUP.route || from == AppDest.RUN.route ||
-                        from == AppDest.BATCH.route || from == AppDest.PLUGIN.route
-                    ) {
-                        // 从子页去别的平级页：先回控制台，避免栈底被顶掉
+                    // 从任一子页切到平级入口时，先回控制台再走 go()，否则
+                    // `popUpTo(CONSOLE)` 找不到栈底，回退栈会被顶掉（坑 20）。
+                    //
+                    // ⚠️ 这里必须列**全部**子页。原先只列了 SETUP/RUN/BATCH/PLUGIN，
+                    // 漏了 CONFIG 与 UNCHECK —— 从这两页点侧边栏，栈底就没了，
+                    // 表现为「点了菜单之后再返回，退不回控制台」。
+                    // 用 inMenu 反推而不是手写清单：新增子页时忘加就又会漏。
+                    if (!AppDest.of(from).inMenu) {
                         nav.popBackStack(AppDest.CONSOLE.route, inclusive = false)
                     }
                 }
@@ -214,11 +259,17 @@ fun AppRoot(
             composable(AppDest.CONSOLE.route) {
                 ConsoleScreen(
                     vm = console,
-                    onOpenDrawer = { scope.launch { drawerState.open() } },
+                    onOpenDrawer = ::openDrawer,
                     onOpenSetup = ::openSetup,
                     onOpenRun = ::openRun,
                     onOpenConfig = ::pushConfig,
                     onOpenBatch = ::openBatch,
+                    // 去校验继承控制台刚选的包：先落进它的 VM，再跳过去。
+                    // 这样它不再需要自己的选择器（那会是第二个上传入口）。
+                    onOpenUncheck = { picked ->
+                        uncheck.setInput(picked)
+                        openUncheck()
+                    },
                 )
             }
             composable(AppDest.PLUGIN.route) {
@@ -252,7 +303,7 @@ fun AppRoot(
             }
             composable(AppDest.CONFIG.route) {
                 ConfigScreen(
-                    onOpenDrawer = { scope.launch { drawerState.open() } },
+                    onOpenDrawer = ::openDrawer,
                     onBack = {
                         // 从子页进来就直接退回去；侧边栏直接切到配置页时没有可退的，回控制台
                         if (nav.previousBackStackEntry?.destination?.route != AppDest.CONSOLE.route) {
@@ -266,7 +317,12 @@ fun AppRoot(
                 )
             }
             composable(AppDest.UNCHECK.route) {
-                UncheckScreen(onOpenDrawer = { scope.launch { drawerState.open() } })
+                UncheckScreen(
+                    vm = uncheck,
+                    onOpenDrawer = ::openDrawer,
+                    // 返回控制台：去校验是控制台的模块，不是独立的一层
+                    onBack = { uncheck.clearInput(); back() },
+                )
             }
             composable(AppDest.SIGN.route) {
                 ComingSoonScreen(
@@ -274,12 +330,12 @@ fun AppRoot(
                     body = "产物目前保持原签名，只能覆盖安装到已装同签名包的设备。\n" +
                         "下一步会接 apksig 做重签——难点是它的 java.util.stream 依赖在 Android 上不存在，\n" +
                         "要换实现或调系统 apksigner。",
-                    onOpenDrawer = { scope.launch { drawerState.open() } },
+                    onOpenDrawer = ::openDrawer,
                 )
             }
             composable(AppDest.ABOUT.route) {
                 AboutScreen(
-                    onOpenDrawer = { scope.launch { drawerState.open() } },
+                    onOpenDrawer = ::openDrawer,
                     onOpenConfig = ::pushConfig,
                 )
             }
@@ -297,7 +353,7 @@ fun AppRoot(
 fun AppDrawerContent(current: AppDest, onMenuClick: (String) -> Unit) {
     // 子页归到父入口，菜单高亮才不会掉
     val highlighted = when (current) {
-        AppDest.SETUP, AppDest.RUN, AppDest.BATCH -> AppDest.CONSOLE
+        AppDest.SETUP, AppDest.RUN, AppDest.BATCH, AppDest.UNCHECK -> AppDest.CONSOLE
         else -> current
     }
     Box(Modifier.fillMaxHeight()) {

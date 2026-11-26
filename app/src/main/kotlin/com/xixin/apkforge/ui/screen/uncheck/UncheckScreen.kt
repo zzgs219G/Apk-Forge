@@ -1,8 +1,5 @@
 package com.xixin.apkforge.ui.screen.uncheck
 
-import android.app.Activity
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -37,13 +34,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.xixin.apkforge.data.FilePicker
 import com.xixin.apkforge.feature.uncheck.UncheckUiState
 import com.xixin.apkforge.feature.uncheck.UncheckViewModel
 import com.xixin.apkforge.ui.lifted.AppConstants
@@ -80,33 +74,27 @@ import com.xixin.apkforge.ui.lifted.page.AppTopBar
  * ② **没有边界说明卡**。做不到的事在**失败时**用错误信息说，不在首屏常年占位。
  *    唯一保留的一处是「产物未签名」——它直接影响用户下一步动作，属于必须说。
  *
- * ③ **选包复用 MT 逻辑**。`FilePicker.pickApkIntent` 已在控制台用了很久
- *    （MT 已装则限定包名，否则降级系统选择器），这里不再另写一套 `GetContent`。
+ * ③ **本页没有文件选择器**。选包只在控制台发生一次，选完再问「做哪件事」。
+ *    这个页面只接收控制台传进来的包（`AppRoot` 里 `uncheck.setInput(picked)`）。
+ *    上一版它自己带一个上传入口，与控制台是两个同义的页面——那才是重复的来源。
  */
 @Composable
 fun UncheckScreen(
     onOpenDrawer: () -> Unit,
-    vm: UncheckViewModel = viewModel(),
+    vm: UncheckViewModel,
+    /**
+     * 返回控制台。
+     *
+     * 去校验是**控制台的模块**，不是独立入口：控制台选包 → 选「去签名校验」，
+     * 所以退出时回控制台，而不是退出到某个「上传页」（那个页面已经不存在了）。
+     */
+    onBack: () -> Unit = {},
 ) {
-    val context = LocalContext.current
     val ui = vm.ui
-
-    val apkPicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { res ->
-        val uri = res.data?.data
-        if (res.resultCode == Activity.RESULT_OK && uri != null) {
-            runCatching { FilePicker.copyToCache(context, uri, "uncheck") }
-                .onSuccess { vm.setInput(it) }
-                .onFailure { /* 失败保持原状态，不打断用户 */ }
-        }
-    }
-
-    fun pickApk() = apkPicker.launch(FilePicker.pickApkIntent(context))
 
     fun primary() {
         when (ui.primary) {
-            UncheckUiState.Primary.PICK -> pickApk()
+            UncheckUiState.Primary.PICK -> onBack()   // 没包时主按钮回控制台去选
             UncheckUiState.Primary.RUN -> vm.run()
             UncheckUiState.Primary.RUNNING -> Unit
         }
@@ -119,10 +107,13 @@ fun UncheckScreen(
                 onMenuClick = onOpenDrawer,
                 actions = {
                     if (ui.inputApk != null && !ui.running) {
-                        IconButton(onClick = vm::clearInput) {
+                        // 「换一个包」= 回控制台重新选。
+                        // 不能只调 clearInput()：那样会停在一个空白页，
+                        // 而本页已经没有文件选择器了（选包只在控制台）。
+                        IconButton(onClick = { vm.clearInput(); onBack() }) {
                             Icon(
                                 Icons.Rounded.Close,
-                                contentDescription = "换一个",
+                                contentDescription = "换一个包",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
@@ -160,9 +151,10 @@ fun UncheckScreen(
                             description = "选一个 APK，把原签名伪造进它的运行环境。" +
                                 "产物存到 Download/ApkForge，未签名。",
                             action = {
-                                // 空态入口与 FAB 触发同一个动作，不是并列的第二个功能
-                                TextButton(onClick = ::pickApk) {
-                                    Text("选择 APK", style = MaterialTheme.typography.labelLarge)
+                                // 这里不提供文件选择器：选包只有控制台一处（见文件头 ③）。
+                                // 兜底给一个回控制台的入口，避免用户卡在空页。
+                                TextButton(onClick = onBack) {
+                                    Text("去控制台选包", style = MaterialTheme.typography.labelLarge)
                                 }
                             },
                         )
@@ -206,7 +198,7 @@ fun UncheckScreen(
             text = {
                 Text(
                     when (ui.primary) {
-                        UncheckUiState.Primary.PICK -> "选 APK"
+                        UncheckUiState.Primary.PICK -> "去选包"
                         UncheckUiState.Primary.RUNNING -> "处理中"
                         UncheckUiState.Primary.RUN -> if (ui.result != null) "再处理一次" else "开始处理"
                     },

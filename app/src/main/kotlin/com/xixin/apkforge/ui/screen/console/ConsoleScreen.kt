@@ -1,5 +1,9 @@
 package com.xixin.apkforge.ui.screen.console
 
+import com.xixin.apkforge.ui.lifted.components.sheet.SheetActionRow
+import com.xixin.apkforge.ui.lifted.components.sheet.OptionSheet
+import androidx.compose.material.icons.rounded.Security
+import java.io.File
 import android.app.Activity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -106,11 +110,27 @@ fun ConsoleScreen(
     onOpenRun: () -> Unit = {},
     onOpenConfig: () -> Unit = {},
     onOpenBatch: () -> Unit = {},
+    /**
+     * 选完包、用户挑「去签名校验」时走这里。
+     *
+     * 带 `File` 参数是必须的：去校验继承**控制台刚选的这个包**，
+     * 不再自己弹一次选择器（那样就成了两个上传入口）。
+     */
+    onOpenUncheck: (File) -> Unit = {},
 ) {
     val state = vm.state
     val context = LocalContext.current
     val listState = rememberLazyListState()
     var menu by remember { mutableStateOf(false) }
+
+    /**
+     * 选完包后要做什么。null = 面板没开。
+     *
+     * 之所以要这个中间态：一个 APK 可以走两条完全不同的路（注入 / 去校验），
+     * 而**选包这件事只有一处**。让用户选完包再问「做哪件事」，
+     * 比在入口处分两个页面各自上传同一份文件要诚实。
+     */
+    var pendingApk by remember { mutableStateOf<File?>(null) }
 
     val apkPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -118,12 +138,7 @@ fun ConsoleScreen(
         val uri = res.data?.data
         if (res.resultCode == Activity.RESULT_OK && uri != null) {
             runCatching { FilePicker.copyToCache(context, uri, "apk") }
-                .onSuccess {
-                    vm.selectApk(it)
-                    // 选完包立刻进配置页：用户的下一步必然是「选配置 / 确认注入点」。
-                    // 解析在后台继续，配置页会先立起来并显示「正在读包」。
-                    onOpenSetup()
-                }
+                .onSuccess { pendingApk = it }
                 .onFailure { vm.showMessage("APK 读取失败：${it.message}") }
         }
     }
@@ -371,6 +386,40 @@ fun ConsoleScreen(
                     TextButton(onClick = vm::consumeMessage) {
                         Text("知道了", color = MaterialTheme.colorScheme.inversePrimary)
                     }
+                }
+            }
+        }
+        // ── 模块选择：选完包之后问「做哪件事」 ──
+        //
+        // 为什么在这里问而不是在入口处分两个页面：上传动作只有一处，
+        // 用户不必记住「我上次是在哪个页面选的包」。两条路本质上是同一个输入的
+        // 两种处理，先选文件再选处理方式更符合直觉。
+        val picked = pendingApk
+        if (picked != null) {
+            OptionSheet(
+                title = "对 ${picked.name} 做什么",
+                onDismiss = { pendingApk = null },
+            ) { close ->
+                Column(Modifier.padding(bottom = 12.dp)) {
+                    SheetActionRow(
+                        text = "dex 注入",
+                        icon = Icons.Rounded.PlayArrow,
+                        onClick = {
+                            close()
+                            pendingApk = null
+                            vm.selectApk(picked)
+                            onOpenSetup()
+                        },
+                    )
+                    SheetActionRow(
+                        text = "去签名校验",
+                        icon = Icons.Rounded.Security,
+                        onClick = {
+                            close()
+                            pendingApk = null
+                            onOpenUncheck(picked)
+                        },
+                    )
                 }
             }
         }

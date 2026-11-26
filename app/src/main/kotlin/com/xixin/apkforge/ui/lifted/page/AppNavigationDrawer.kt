@@ -93,23 +93,58 @@ fun AppModalNavigationDrawer(
     // 协程（LaunchedEffect / scope.launch）内无法读 MaterialTheme，故先在此取值再传入。
     val motionScheme = MaterialTheme.motionScheme
     val density = LocalDensity.current
-    val drawerWidthDp = LocalConfiguration.current.screenWidthDp.dp * 0.82f
-    val drawerWidthPx = with(density) { drawerWidthDp.toPx() }
+    val screenWidthDp = LocalConfiguration.current.screenWidthDp
+    val drawerWidthDp = screenWidthDp.dp * 0.82f
+    /**
+     * 抽屉宽度（px）。
+     *
+     * ⚠️ **必须兜底成 1f 以上，不能直接用 `toPx()`**。
+     *
+     * `LocalConfiguration.screenWidthDp` 在**旋转 / 分屏 / 折叠屏展开**的重配过程中
+     * 会短暂返回 0（Compose 已知行为）。此时 `drawerWidthPx == 0f`，而下面
+     * `progress = 1 + offsetX / drawerWidthPx` 会算出 `NaN`：
+     *
+     * ```
+     *   offsetX / 0f  =  NaN           （-0f/0f 也是 NaN）
+     *   progress      =  NaN
+     *   isVisible     =  NaN > 0.001   → false
+     *   offsetX       =  NaN           ← 被 animate() 以 NaN 为初值写回
+     * ```
+     *
+     * 一旦 `offsetX` 变成 NaN，`coerceIn` 对 NaN 是**直接返回 NaN**，
+     * 之后无论怎么点、怎么拖都恢复不了 —— 表现为「连点几次就崩/侧边栏再也打不开」。
+     * 这条路径只在屏幕尺寸变化时命中，所以症状是「经常」而不是「每次」。
+     *
+     * 兜底到 1f 让除法永远是有限值；真实宽度为 0 时抽屉本来也没有可显示的空间。
+     */
+    val drawerWidthPx = with(density) { drawerWidthDp.toPx() }.let {
+        if (it.isFinite() && it > 0f) it else 1f
+    }
 
     // ── offsetX：抽屉面板的水平偏移，单位像素 ─────────────────────────────────
     // 取值范围：-drawerWidthPx（完全关闭）到 0f（完全打开）
     // 这是整个系统唯一的真相来源，所有视觉效果从它派生。
-    // 初始值根据 DrawerState 的初始值决定
-    var offsetX by remember {
+    //
+    // ⚠️ key 必须是 drawerWidthPx：屏幕尺寸变化后要按**新宽度**重新落位，
+    //    否则旧偏移量配新宽度，抽屉会停在半开的位置。
+    var offsetX by remember(drawerWidthPx) {
         mutableFloatStateOf(
             if (state.currentValue == DrawerValue.Open) 0f else -drawerWidthPx
         )
     }
 
     // ── progress：从 offsetX 实时派生，0f=关闭，1f=打开 ──────────────────────
-    // derivedStateOf：只有 offsetX 变化时才重新计算，避免多余重组
-    val progress by remember {
-        derivedStateOf { 1f + (offsetX / drawerWidthPx) }
+    //
+    // ⚠️ `remember(drawerWidthPx)` 的 key 同样不能省：`derivedStateOf` 的 lambda
+    //    捕获的是创建那次组合里的 `drawerWidthPx`。不重建的话，旋转之后
+    //    progress 仍按旧宽度算，蒙层透明度与可见性判定都会错。
+    //    再额外 coerceIn：派生出界外的值能挡住但不该出现，挡住是为了不把
+    //    NaN/Infinity 传播给 alpha（Scrim 会因此整块变黑或消失）。
+    val progress by remember(drawerWidthPx) {
+        derivedStateOf {
+            val p = 1f + (offsetX / drawerWidthPx)
+            if (p.isFinite()) p.coerceIn(0f, 1f) else 0f
+        }
     }
 
     // ── 蒙层和面板是否应该存在（progress 归零后就完全移除，节省资源）────────────
@@ -117,21 +152,31 @@ fun AppModalNavigationDrawer(
         derivedStateOf { progress > 0.001f }
     }
 
+    // 唯一的写入闸门：任何对 offsetX 的写入都走这里。
+    //
+    // 为什么要一个函数而不是直接赋值：`offsetX` 有 4 个写入点（初始值 /
+    // 外部 open-close 动画 / 拖动 / settle 收尾），其中任何一处漏掉有限性检查，
+    // 都会让抽屉永久卡死 —— NaN 一旦写进去，`coerceIn` 会原样返回 NaN，
+    // 之后再怎么点都恢复不了。收成一处之后，「不可能写出 NaN」只依赖这一个函数。
+    fun setOffset(v: Float) {
+        if (!v.isFinite()) return
+        offsetX = v.coerceIn(-drawerWidthPx, 0f)
+    }
+
     // ── 监听外部 DrawerState 变化，用 animate() 平滑过渡到目标位置 ───────────
     // 🎓 LaunchedEffect(key)：key 变化时重新执行，可被新的执行取消（自动取消旧动画）
     // 这样 state.open() / state.close() 调用就能触发我们自己的动画
-    LaunchedEffect(state.targetValue) {
+    //
+    // ⚠️ key 里带上 drawerWidthPx：屏幕尺寸变了要按新宽度重算目标位置。
+    LaunchedEffect(state.targetValue, drawerWidthPx) {
         val targetOffsetX = if (state.targetValue == DrawerValue.Open) 0f else -drawerWidthPx
         // animate()：协程版本的动画，会挂起直到动画完成
-        // spring：弹簧动画参数与原生 Material3 Drawer 一致
         animate(
             initialValue = offsetX,
             targetValue = targetOffsetX,
             // 原写法 spring(dampingRatio = 0.8f, stiffness = 380f)（与官方值完全相同）
             animationSpec = motionScheme.defaultSpatialSpec()
-        ) { value, _ ->
-            offsetX = value
-        }
+        ) { value, _ -> setOffset(value) }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -196,8 +241,7 @@ fun AppModalNavigationDrawer(
                                 velocityTracker.addPointerInputChange(change)
 
                                 // 直接修改 offsetX → 面板实时跟手，无延迟
-                                // coerceIn：限制在合法范围内，防止拖出边界
-                                offsetX = (offsetX + dragAmount).coerceIn(-drawerWidthPx, 0f)
+                                setOffset(offsetX + dragAmount)
                             },
                             onDragEnd = {
                                 val velocityX = velocityTracker.calculateVelocity().x
@@ -207,33 +251,22 @@ fun AppModalNavigationDrawer(
                                 //   向左快速滑（< -300）→ 关闭
                                 //   向右快速滑（> +300）→ 打开
                                 //   速度不够快 → 根据当前位置判断过没过一半
+                                val safeVelocity = if (velocityX.isFinite()) velocityX else 0f
                                 val shouldClose = when {
-                                    velocityX < -300f -> true
-                                    velocityX > 300f  -> false
+                                    safeVelocity < -300f -> true
+                                    safeVelocity > 300f -> false
                                     else -> offsetX < -drawerWidthPx / 2f
                                 }
 
                                 scope.launch {
-                                    if (shouldClose) {
-                                        // 先做收尾动画，再同步 state
-                                        animate(
-                                            initialValue = offsetX,
-                                            targetValue = -drawerWidthPx,
-                                            // 原写法 spring(dampingRatio = 0.8f, stiffness = 380f)
-                                            animationSpec = motionScheme.defaultSpatialSpec()
-                                        ) { value, _ -> offsetX = value }
-                                        // 回写 state，让外部感知（不会触发重复动画，
-                                        // 因为 targetValue 此时已经是 Closed）
-                                        state.close()
-                                    } else {
-                                        animate(
-                                            initialValue = offsetX,
-                                            targetValue = 0f,
-                                            // 原写法 spring(dampingRatio = 0.8f, stiffness = 380f)
-                                            animationSpec = motionScheme.defaultSpatialSpec()
-                                        ) { value, _ -> offsetX = value }
-                                        state.open()
-                                    }
+                                    val target = if (shouldClose) -drawerWidthPx else 0f
+                                    animate(
+                                        initialValue = offsetX,
+                                        targetValue = target,
+                                        animationSpec = motionScheme.defaultSpatialSpec()
+                                    ) { value, _ -> setOffset(value) }
+                                    // 回写 state，让外部感知
+                                    if (shouldClose) state.close() else state.open()
                                 }
                             }
                         )
