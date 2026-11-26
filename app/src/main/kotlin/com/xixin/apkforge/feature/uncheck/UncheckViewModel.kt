@@ -44,6 +44,15 @@ data class UncheckUiState(
     /** 0..1，驱动进度条。载荷下载占前段，装配占后段 */
     val progress: Float = 0f,
 
+    /**
+     * native hook 档位。默认全量。
+     *
+     * 暴露给用户是因为它直接影响目标 App 能否正常联网：全量 hook 会把
+     * 目标 App 的正常文件访问一起重定向，实测 JMComic 会因此网络与图片全挂。
+     * 遇到那种情况降到 CORE 就能恢复 —— 这个开关不给用户，他就只能认定「工具坏了」。
+     */
+    val hookLevel: Int = UncheckPipeline.HookLevel.FULL,
+
     /** 最近一次结果 */
     val result: UncheckPipeline.Result? = null,
 
@@ -184,6 +193,7 @@ class UncheckViewModel(app: Application) : AndroidViewModel(app) {
                         input = input,
                         output = out,
                         payload = payload,
+                        hookLevel = ui.hookLevel,
                         progress = UncheckPipeline.Progress { stage, detail ->
                             val isNew = seenStages.add(stage)
                             val frac = (seenStages.size.toFloat() / expectedStages)
@@ -227,6 +237,12 @@ class UncheckViewModel(app: Application) : AndroidViewModel(app) {
                 logs.error("处理失败", "$msg\n\n${e.stackTraceToString()}")
             }
         }
+    }
+
+    /** 切换 hook 档位。运行中不允许改（改的是已经跑起来的那份快照）。 */
+    fun setHookLevel(level: Int) {
+        if (ui.running) return
+        ui = ui.copy(hookLevel = level)
     }
 
     fun clearError() {

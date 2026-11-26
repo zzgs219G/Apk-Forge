@@ -336,6 +336,85 @@ class UncheckPipelineTest {
         assertTrue("产物不该是空文件", out.length() > 1024)
     }
 
+    /**
+     * `sigfix.json` 必须含 `hookLevel`，且落在 [1,3]。
+     *
+     * ## 防的是什么
+     *
+     * 载荷侧读的是 `o.optInt("hookLevel", 6)`。这个字段**缺失时不报错**，
+     * 只会拿到默认值 —— 而用户以为自己在用低档（为了不破坏目标 App 的网络），
+     * 实际跑的是全量 hook。这类「配置没写进去」的问题在真机上只表现为
+     * 「某些 App 网络坏掉」，与本模块完全联想不到一起。
+     *
+     * 档位数值是跨语言协议（对应 native 的 `NC_HOOK_LEVEL_*`），改一个数
+     * 就是协议变更，所以这里把 [1,3] 与默认值都钉住。
+     */
+    @Test
+    fun `sigfix_json 含合法 hookLevel`() {
+        val apk = locateApk() ?: return
+        val work = workDir("hooklevel")
+        val out = File(work, "out.apk")
+
+        // 默认档位
+        UncheckPipeline.run(apk, out, fakePayload(), workDir = work)
+        val json = String(readEntry(out, UncheckPayload.ASSET_CONFIG)!!, Charsets.UTF_8)
+        val lv = Regex(""""hookLevel"\s*:\s*(\d+)""")
+            .find(json)?.groupValues?.get(1)?.toIntOrNull()
+        assertNotNull("sigfix.json 必须有 hookLevel 字段（缺了会静默用默认值）: $json", lv)
+        assertEquals(
+            "默认档位必须是 FULL(3)，与历史行为一致",
+            UncheckPipeline.HookLevel.FULL,
+            lv,
+        )
+        assertEquals("FULL 的协议值必须是 3", 3, UncheckPipeline.HookLevel.FULL)
+        assertEquals("CORE 的协议值必须是 1", 1, UncheckPipeline.HookLevel.CORE)
+        assertEquals("AT 的协议值必须是 2", 2, UncheckPipeline.HookLevel.AT)
+    }
+
+    /** 越界的 hookLevel 必须被钳位，不能原样写进配置。 */
+    @Test
+    fun `hookLevel 越界被钳位`() {
+        assertTrue(
+            "小于 1 应钳到 CORE",
+            String(
+                UncheckPipeline.buildConfigJson("c", "a", hookLevel = 0),
+                Charsets.UTF_8,
+            ).contains("\"hookLevel\":1"),
+        )
+        assertTrue(
+            "大于 3 应钳到 FULL",
+            String(
+                UncheckPipeline.buildConfigJson("c", "a", hookLevel = 99),
+                Charsets.UTF_8,
+            ).contains("\"hookLevel\":3"),
+        )
+        assertTrue(
+            "合法值原样保留",
+            String(
+                UncheckPipeline.buildConfigJson("c", "a", hookLevel = 1),
+                Charsets.UTF_8,
+            ).contains("\"hookLevel\":1"),
+        )
+    }
+
+    /** 指定的档位要真的落进产物。 */
+    @Test
+    fun `指定 hookLevel 能落进产物`() {
+        val apk = locateApk() ?: return
+        val work = workDir("hooklevel-core")
+        val out = File(work, "out.apk")
+
+        UncheckPipeline.run(
+            apk, out, fakePayload(), workDir = work,
+            hookLevel = UncheckPipeline.HookLevel.CORE,
+        )
+        val json = String(readEntry(out, UncheckPayload.ASSET_CONFIG)!!, Charsets.UTF_8)
+        assertTrue(
+            "指定 CORE(1) 应原样落进 sigfix.json，实际: $json",
+            json.contains("\"hookLevel\":1"),
+        )
+    }
+
     /** 新 dex 名必须避开已有名字。 */
     @Test
     fun `新 dex 名不占用已有名字`() {

@@ -109,6 +109,14 @@ object UncheckPipeline {
         output: File,
         payload: UncheckPayload.Payload,
         workDir: File? = null,
+        /**
+         * native hook 档位，见 [HookLevel]。
+         *
+         * 默认全量。目标 App 若出现网络/资源加载异常，降到 [HookLevel.CORE] 重试 ——
+         * 这是上游 2026-11-27 实测后加的救生索：全量 hook 会把目标 App 的
+         * 正常文件访问一起改写，JMComic 就是这样被搞坏网络和图片的。
+         */
+        hookLevel: Int = HookLevel.FULL,
         progress: Progress = Progress { _, _ -> },
     ): Result {
         if (!input.isFile) throw PipelineException("输入不存在：${input.absolutePath}")
@@ -210,6 +218,7 @@ object UncheckPipeline {
             val config = buildConfigJson(
                 certB64 = java.util.Base64.getEncoder().encodeToString(cert.certDer),
                 originalApp = parsed.applicationName ?: "",
+                hookLevel = hookLevel,
             )
             val extra = buildList {
                 add(ZipReuse.ExtraEntry(newDex, payload.bootDex, ZipCentralDirectory.METHOD_DEFLATED))
@@ -568,15 +577,20 @@ object UncheckPipeline {
     /**
      * 生成 `sigfix.json`。
      *
-     * 只有两个字段，都是载荷运行期需要的目标相关数据：
+     * 三个字段，都是载荷运行期需要的目标相关数据：
      * - `cert`：原证书 DER 的 Base64（Java 层伪造签名用）
      * - `originalApp`：原 Application 类名（代理链要反射创建它）
+     * - `hookLevel`：native hook 覆盖档位（1/2/3，见 [HookLevel]）
      *
      * 为什么放 JSON 而不是烘焙进 dex：证书 Base64 长度随 keystore 变
      * （888~1152 字符），改 dex 字符串池要重建；放一份小 JSON 则改数据不碰 dex，
      * dex 保持静态资产（可入 git、可下载、可缓存）。
      */
-    internal fun buildConfigJson(certB64: String, originalApp: String): ByteArray {
+    internal fun buildConfigJson(
+        certB64: String,
+        originalApp: String,
+        hookLevel: Int = HookLevel.FULL,
+    ): ByteArray {
         fun esc(s: String): String {
             val sb = StringBuilder("\"")
             for (c in s) {
@@ -589,7 +603,43 @@ object UncheckPipeline {
             }
             return sb.append('"').toString()
         }
-        return """{"cert":${esc(certB64)},"originalApp":${esc(originalApp)}}"""
+        // hookLevel 必须落在 [1,3]：native 侧虽然会钳位，但在这里就钳掉，
+        // 免得写出一个越界值让 native 的钳位成为唯一防线。
+        val lv = hookLevel.coerceIn(HookLevel.CORE, HookLevel.FULL)
+        return """{"cert":${esc(certB64)},"originalApp":${esc(originalApp)},"hookLevel":$lv}"""
             .toByteArray(Charsets.UTF_8)
+    }
+
+    /**
+     * native hook 覆盖档位。
+     *
+     * ## 为什么需要分档（上游 2026-11-27 真机实测）
+     *
+     * 全量 hook 会把目标 App 的**正常文件访问**一起改写：实测 JMComic
+     * 只做 Java 层 → 无盗版警告且网络正常；加上 native 层 → 网络与图片加载
+     * 全部失败。原因是 18 个 libc 函数里有些被 App 自己的代码路径依赖，
+     * 重定向到 origin.apk 后它读不到期望的资源。
+     *
+     * ## 三档是超集关系
+     *
+     * ```
+     * 1 CORE  open/open64/__open_2/fopen/fopen64/access/stat
+     *         任何 native 校验都必须先打开 base.apk，这 7 个是主路径
+     * 2 AT    + faccessat/lstat/openat/openat64/__openat_2/readlink/readlinkat
+     *         防「按 fd 反查路径」那类取证
+     * 3 FULL  + openat2/statx/opendir（默认，与历史行为一致）
+     * ```
+     *
+     * 数值与载荷侧的 `NC_HOOK_LEVEL_*` 一一对应，**不能改**——改了就是协议变更。
+     */
+    object HookLevel {
+        /** 只挂核心 7 个：最不容易影响目标 App 正常运行 */
+        const val CORE = 1
+
+        /** 核心 + at 家族：防 fd 反查 */
+        const val AT = 2
+
+        /** 全量（默认）：覆盖最广，但可能干扰目标 App 的资源读取 */
+        const val FULL = 3
     }
 }
