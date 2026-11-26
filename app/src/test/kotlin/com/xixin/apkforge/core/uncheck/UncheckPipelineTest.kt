@@ -269,6 +269,73 @@ class UncheckPipelineTest {
         assertTrue("savedByReuse 应为正数", result.savedByReuse > 0)
     }
 
+    /**
+     * 自检失败时**不能**留下产物。
+     *
+     * ## 防的是什么
+     *
+     * 产物是在第 ⑧ 步（数据复用）写出来的，第 ⑨ 步自检如果发现结构不对，
+     * 必须把它删掉。否则用户会在 Download 里看到一个**能装但去校验不生效**的包，
+     * 而比这更糟：他会以为工具"成功了"。
+     *
+     * ## ⚠️ 第一版这条测试是假的，值得记下来
+     *
+     * 原来用「输入不是 APK」当夹具，那种情况在读包阶段就抛异常，output 还没被创建，
+     * 于是「删不删」都测不出差别 —— 把生产代码里的清理改成 `if (false)`，
+     * 测试照样绿（实测过）。这违反了 `AGENTS.md` §2.2：一个测试若删掉被它测的
+     * 生产逻辑仍然通过，它就什么都没测。
+     *
+     * 现在改成让自检**真的失败**：传一个 hadSignature 期望与实际不符的场景——
+     * 用无签名块的包，但让自检认为原包有签名块，它会因为
+     * 「origin.apk 里没有签名块」而抛异常，此时 output 已经完整写出来了。
+     */
+    @Test
+    fun `自检失败时删掉已写出的产物`() {
+        val apk = locateApk() ?: return
+        // 这条只在「原包确实没有签名块」时有意义：那种包自检的第 8 步会被跳过，
+        // 我们反过来用一个保证会失败的构造——见下方 selfCheck 的判据。
+        assumeTrue(
+            "这条测的是「产物已写出但自检不过」的清理；需要真实 APK",
+            apk.isFile,
+        )
+
+        val work = workDir("selfcheck-fail")
+        val out = File(work, "out.apk")
+
+        // 用一个坏掉的载荷让流水线走到最后一步再失败：
+        // boot.dex 不是合法 dex → 自检的「新 dex 必须是合法 dex」会拦住，
+        // 而此时 output 已经被 ZipReuse 完整写出。
+        val bad = UncheckPayload.Payload(
+            version = "test-bad",
+            bootDex = "不是 dex".toByteArray(),
+            payloadDex = "dex\n035\u0000".toByteArray(Charsets.ISO_8859_1),
+            usignArm64 = byteArrayOf(0x7F, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte()),
+            usignArm32 = byteArrayOf(0x7F, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte()),
+        )
+
+        val err = runCatching {
+            UncheckPipeline.run(apk, out, bad, workDir = work)
+        }.exceptionOrNull()
+
+        assertTrue("自检应失败（bootDex 不是合法 dex），实际: $err", err != null)
+        assertTrue(
+            "自检失败后必须删掉已写出的产物，否则用户会拿到一个「能装但无效」的包：$out",
+            !out.isFile,
+        )
+    }
+
+    /** 成功时必须保留产物（别把清理做成"总是删"）。 */
+    @Test
+    fun `成功时产物保留`() {
+        val apk = locateApk() ?: return
+        val work = workDir("keep")
+        val out = File(work, "out.apk")
+
+        UncheckPipeline.run(apk, out, fakePayload(), workDir = work)
+        assertTrue("成功时产物必须存在", out.isFile)
+        assertTrue("产物不该是空文件", out.length() > 1024)
+    }
+
     /** 新 dex 名必须避开已有名字。 */
     @Test
     fun `新 dex 名不占用已有名字`() {

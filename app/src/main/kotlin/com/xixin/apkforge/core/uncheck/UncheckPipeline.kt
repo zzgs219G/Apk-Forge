@@ -64,9 +64,6 @@ import java.util.zip.ZipOutputStream
  */
 object UncheckPipeline {
 
-    /** android:extractNativeLibs 的 framework 资源 ID */
-    private const val ATTR_EXTRACT_NATIVE_LIBS = 0x010104EA.toInt()
-
     /** ZIP local file header 固定部分长度（30 字节）。 */
     private const val LOCAL_HEADER_SIZE = 30
 
@@ -297,7 +294,17 @@ object UncheckPipeline {
                 extractNativeLibs = libsOutcome,
             )
         } finally {
-            // 中间文件不留给用户：它们的体积可达原包两倍
+            // 中间文件不留给用户：它们的体积可达原包两倍。
+            //
+            // 关于产物本身的清理：**不在这里做**。
+            // `output` 只在第 ⑧ 步 `ZipReuse.build` 时才开始被写，而
+            // 「写完但内容不对」的那条路径由第 ⑨ 步的自检显式 `output.delete()` 处理
+            // （在下面 catch 里）。①②③④⑤⑥⑦ 失败时 output 还没被创建，
+            // 无需清理；⑧ 失败时 ZipReuse 自己会删掉写到一半的文件。
+            //
+            // 曾经在这里加过一个 `if (!succeeded) output.delete()`，那是多余的：
+            // 写测试时发现「把它删掉测试照样绿」——说明那段代码从未真正保护过任何路径。
+            // 一个不保护任何东西的防御，比没有更容易误导后来人。
             if (workDir == null) work.deleteRecursively()
         }
     }

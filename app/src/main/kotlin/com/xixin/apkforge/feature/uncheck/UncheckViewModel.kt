@@ -160,23 +160,40 @@ class UncheckViewModel(app: Application) : AndroidViewModel(app) {
 
                 // ② 跑流水线
                 val out = File(outputDir(), buildOutputName(input))
-                var lastStage = ""
+
+                /**
+                 * 阶段进度。
+                 *
+                 * ⚠️ 不能用 `ui.progress + 0.12f` 累加。两个原因：
+                 *
+                 * ① **并发读改写**：本回调在 IO 线程，而 `ui` 是 Compose 状态。
+                 *    `ui.copy(progress = ui.progress + x)` 里的 `ui.progress` 可能在
+                 *    读与写之间被主线程的另一次 copy 覆盖，累加会丢步甚至回退。
+                 * ② **靠次数推前进量不稳定**：某个阶段重复上报时进度会跳。
+                 *
+                 * 改成「本次已上报过的不同阶段数 / 预估总阶段数」：
+                 * 单调、与回调频次无关、也不需要在 VM 里硬编码一份阶段名清单
+                 * （那种清单必然与 `UncheckPipeline` 漂移）。
+                 */
+                val seenStages = LinkedHashSet<String>()
+                // 装配阶段的粗估总数。只影响进度条的"看起来走了多少"，
+                // 不参与任何判定；估少了只是提前到 96%，估多了停得早一点。
+                val expectedStages = 16
                 val result = withContext(Dispatchers.IO) {
                     UncheckPipeline.run(
                         input = input,
                         output = out,
                         payload = payload,
                         progress = UncheckPipeline.Progress { stage, detail ->
-                            // 载荷已就绪，装配阶段从 0.05 走到 1.0
-                            if (stage != lastStage) {
-                                lastStage = stage
-                                ui = ui.copy(
-                                    stage = stage,
-                                    stageDetail = detail,
-                                    progress = (ui.progress + 0.12f).coerceAtMost(0.96f),
-                                )
+                            val isNew = seenStages.add(stage)
+                            val frac = (seenStages.size.toFloat() / expectedStages)
+                                .coerceIn(0.02f, 0.96f)
+                            if (isNew) {
                                 logs.addLog(if (detail.isBlank()) stage else "$stage · $detail")
+                                ui = ui.copy(stage = stage, stageDetail = detail, progress = frac)
                             } else {
+                                // 同一阶段内的细节更新（如"写入 x/y 条目"），
+                                // 不重复记日志、也不推进度
                                 ui = ui.copy(stageDetail = detail)
                             }
                         },
@@ -193,6 +210,17 @@ class UncheckViewModel(app: Application) : AndroidViewModel(app) {
                 logs.result(result.output.name, logSummary(result))
                 logs.addLog("产物：${result.output.absolutePath}")
                 logs.addLog("未签名 —— 用你自己的 keystore 签，且必须用 MT 管理器这类手写 ZIP 的工具")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                // ⚠️ 必须单独接住。CancellationException 是 CoroutineScope 的
+                // **正常取消信号**（用户退出页面 / 切换模块都会触发），不是错误。
+                // 若被下面的 `catch (Exception)` 吞掉并当成失败上报：
+                //   · 用户会看到一条假的「处理失败」
+                //   · cancel 被吃掉后无法正确向上传播，协程终止语义被破坏
+                //
+                // 但**状态必须复位**：否则用户回到页面会看到 running 永远 true、
+                // 按钮永久禁用、进度条卡在中间。
+                ui = ui.copy(running = false, stage = "", stageDetail = "", progress = 0f)
+                throw e
             } catch (e: Exception) {
                 val msg = e.message ?: e::class.simpleName ?: "未知错误"
                 ui = ui.copy(running = false, stage = "", progress = 0f, error = msg)
