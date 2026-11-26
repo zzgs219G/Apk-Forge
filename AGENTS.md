@@ -148,8 +148,7 @@ app/src/test/kotlin/com/xixin/apkforge/
 ├── core/axml/AxmlBooleanTest      7 例  false→true 原位、幂等、不存在时新增、resourceId 升序、rawValue=NO_INDEX
 ├── core/uncheck/UncheckPayloadTest      13 例  sha256 标准向量、索引解析、缺文件/格式错、魔数与大小校验、落点常量契约
 ├── core/uncheck/ZipReuseTest            10 例  体积不翻倍、origin 是完整 APK、arsc 对齐、LFH↔CD extra 一致、标准 ZipFile 交叉验证
-├── core/uncheck/UncheckAssemblyOrderTest 6 例  真实 APK 的组装顺序：签名块保留、错序会丢、复用在位
-├── core/uncheck/UncheckPipelineTest      9 例  七落点齐全、原包条目一条不少、只多预期条目、自检、复用体积
+├── core/uncheck/UncheckPipelineTest     10 例  七落点齐全、条目一条不少、只多预期条目、自检、复用体积、签名块顺序反向说明
 └── support/TestIo                 测试专用 IO 封装
 
 payload/dialog/                   弹窗载荷源码（Java，零依赖）
@@ -746,7 +745,7 @@ rebuild 中间包 → 注入签名块 → 数据复用 → 输出
 
 云端 2026-11-24 就是漏了这一步：加固包的 `.ncx` 段解密出乱码 → 跳野地址
 → **SIGBUS**。`UncheckPipeline` 的自检直接查「原包有签名块时 origin.apk
-里也必须带」，`UncheckAssemblyOrderTest` 再钉一遍顺序。
+里也必须带」，`UncheckPipelineTest` 的「顺序错时签名块会丢」再钉一遍。
 
 ### 11.7 与 dex 注入的关系
 

@@ -54,7 +54,7 @@ import java.util.zip.ZipOutputStream
  * ⑨ 自检 → 输出
  * ```
  *
- * ⑦⑧ 的顺序在云端有过一次真机事故（SIGBUS），`UncheckAssemblyOrderTest` 钉住。
+ * ⑦⑧ 的顺序在云端有过一次真机事故（SIGBUS），`UncheckPipelineTest` 钉住。
  *
  * ## 为什么产物不签名
  *

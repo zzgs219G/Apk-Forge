@@ -132,11 +132,6 @@ class PayloadFetcher(private val context: Context) {
         return null
     }
 
-    /** 当前有没有可用的缓存版本号（UI 展示用，不联网）。 */
-    fun cachedVersionOrNull(): String? = cachedOrNull()?.version
-
-    // ── 内部 ─────────────────────────────────────────────────
-
     /** 从目录读四个文件并校验；任一缺失/不符返回 null（不抛异常）。 */
     private fun readFromDir(dir: File, index: UncheckPayload.Index): UncheckPayload.Payload? {
         if (!dir.isDirectory) return null

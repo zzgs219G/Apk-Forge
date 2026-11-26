@@ -38,6 +38,7 @@ build-log/
 
 # CI 产物与签名（密钥绝不入库）
 dist/
+dist-*/
 release.keystore
 release.properties
 *.keystore

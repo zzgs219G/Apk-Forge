@@ -284,6 +284,64 @@ class UncheckPipelineTest {
         )
     }
 
+    /**
+     * 顺序的反向说明：**产物之后再重写一次 ZIP，origin.apk 里的签名块必然丢**。
+     *
+     * 这条不是「期望这样」，而是把已知的错法固化下来 —— 让后来的人一眼看到
+     * 「为什么签名块必须在中间包之后、数据复用之前注入，且之后不能再跑
+     * apksigner / zipalign」。
+     *
+     * 云端 2026-11-24 的 SIGBUS 事故就是这一步漏了：加固包的 .ncx 段要靠
+     * 自己 APK 里的证书解，签名块丢了 → 解出乱码 → 跳野地址。
+     */
+    @Test
+    fun `顺序错时签名块会丢_反向说明`() {
+        val apk = locateApk() ?: return
+        assumeTrue("测试 APK 无签名块，跳过", ApkSigningBlock.hasBlock(apk))
+
+        val work = workDir("wrong-order")
+        val out = File(work, "out.apk")
+        UncheckPipeline.run(apk, out, fakePayload(), workDir = work)
+
+        // 正确顺序下 origin.apk 应带签名块
+        val layout = ZipCentralDirectory.read(out)
+        val goodOrigin = File(work, "good-origin.apk")
+        goodOrigin.writeBytes(ZipCentralDirectory.readRaw(out, layout.byName(UncheckPayload.ASSET_ORIGIN)!!))
+        assertTrue(
+            "前置条件：正确顺序下 origin.apk 应带签名块",
+            ApkSigningBlock.hasBlock(goodOrigin),
+        )
+
+        // 模拟「复用之后又跑了一次 zipalign / apksigner」——重写整个 ZIP
+        val rewritten = File(work, "rewritten.apk")
+        ZipFile(out).use { zin ->
+            java.util.zip.ZipOutputStream(rewritten.outputStream().buffered()).use { zout ->
+                for (e in zin.entries()) {
+                    zout.putNextEntry(java.util.zip.ZipEntry(e.name))
+                    zout.write(zin.getInputStream(e).use { it.readBytes() })
+                    zout.closeEntry()
+                }
+            }
+        }
+        val rl = ZipCentralDirectory.read(rewritten)
+        val badOrigin = File(work, "bad-origin.apk")
+        badOrigin.writeBytes(
+            ZipCentralDirectory.readRaw(rewritten, rl.byName(UncheckPayload.ASSET_ORIGIN)!!)
+        )
+
+        assertTrue(
+            "重写后 origin.apk 的签名块必然消失 —— 这就是「复用之后绝不能再跑任何 " +
+                "ZIP 重写工具」（zipalign / apksigner 都会）的由来。" +
+                "若此断言变红，说明 java.util.zip 行为变了，需重新评估注入顺序。",
+            !ApkSigningBlock.hasBlock(badOrigin),
+        )
+        // 顺带确认：重写后体积也翻倍（重叠条目被展开）
+        assertTrue(
+            "重写后体积应变大（重叠条目被展开成两份），实际 ${out.length()} → ${rewritten.length()}",
+            rewritten.length() > out.length(),
+        )
+    }
+
     /** extractNativeLibs 的三种形态都要能被流水线正确报告。 */
     @Test
     fun `extractNativeLibs 改写结果被如实报告`() {
