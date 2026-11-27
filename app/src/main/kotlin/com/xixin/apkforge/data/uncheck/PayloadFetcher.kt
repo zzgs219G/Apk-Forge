@@ -2,6 +2,7 @@ package com.xixin.apkforge.data.uncheck
 
 import android.content.Context
 import android.util.Log
+import com.xixin.apkforge.core.Bytes.readBytesCompat
 import com.xixin.apkforge.core.uncheck.UncheckPayload
 import java.io.File
 import java.io.IOException
@@ -200,17 +201,6 @@ class PayloadFetcher(private val context: Context) {
         } finally {
             conn.disconnect()
         }
-    }
-
-    private fun java.io.InputStream.readBytesCompat(): ByteArray {
-        val buf = java.io.ByteArrayOutputStream(64 * 1024)
-        val tmp = ByteArray(64 * 1024)
-        while (true) {
-            val n = read(tmp)
-            if (n < 0) break
-            buf.write(tmp, 0, n)
-        }
-        return buf.toByteArray()
     }
 
     private companion object {

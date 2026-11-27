@@ -1,5 +1,7 @@
 package com.xixin.apkforge.core.uncheck
 
+import com.xixin.apkforge.core.Bytes
+
 import com.xixin.apkforge.core.apk.ZipCentralDirectory
 import java.io.File
 import java.io.RandomAccessFile
@@ -187,7 +189,7 @@ object ZipReuse {
         }
 
         val originBytes = originApk.readBytes()
-        if (originBytes.size < 4 || le32(originBytes, 0) != LFH_SIG) {
+        if (originBytes.size < 4 || Bytes.i32(originBytes, 0) != LFH_SIG) {
             throw ReuseException(
                 "origin 内容不是 ZIP/APK（开头应为 PK\\x03\\x04）：${originApk.name}"
             )
@@ -380,7 +382,7 @@ object ZipReuse {
                 null
             }
             if (bytes != null) {
-                if (bytes.size < 4 || le32(bytes, 0) != LFH_SIG) {
+                if (bytes.size < 4 || Bytes.i32(bytes, 0) != LFH_SIG) {
                     problems += "$ORIGIN_ENTRY 开头不是 ZIP local header"
                 } else {
                     val tmp = File.createTempFile("origin-check", ".apk")
@@ -473,17 +475,17 @@ object ZipReuse {
     ): ByteArray {
         val nb = name.toByteArray(Charsets.UTF_8)
         val out = ByteArray(LFH_SIZE + nb.size + extra.size)
-        putInt(out, 0, LFH_SIG)
-        putShort(out, 4, if (method == ZipCentralDirectory.METHOD_DEFLATED) 20 else 10)
-        putShort(out, 6, 0)                       // flags：不用 data descriptor
-        putShort(out, 8, method)
-        putShort(out, 10, 0)                      // mtime
-        putShort(out, 12, 0x21)                   // mdate 1980-01-01（ZIP 最小合法值）
-        putInt(out, 14, crc.toInt())
-        putInt(out, 18, csize.toInt())
-        putInt(out, 22, fsize.toInt())
-        putShort(out, 26, nb.size)
-        putShort(out, 28, extra.size)
+        Bytes.putI32(out, 0, LFH_SIG)
+        Bytes.putU16(out, 4, if (method == ZipCentralDirectory.METHOD_DEFLATED) 20 else 10)
+        Bytes.putU16(out, 6, 0)                       // flags：不用 data descriptor
+        Bytes.putU16(out, 8, method)
+        Bytes.putU16(out, 10, 0)                      // mtime
+        Bytes.putU16(out, 12, 0x21)                   // mdate 1980-01-01（ZIP 最小合法值）
+        Bytes.putI32(out, 14, crc.toInt())
+        Bytes.putI32(out, 18, csize.toInt())
+        Bytes.putI32(out, 22, fsize.toInt())
+        Bytes.putU16(out, 26, nb.size)
+        Bytes.putU16(out, 28, extra.size)
         System.arraycopy(nb, 0, out, LFH_SIZE, nb.size)
         System.arraycopy(extra, 0, out, LFH_SIZE + nb.size, extra.size)
         return out
@@ -500,23 +502,23 @@ object ZipReuse {
     ): ByteArray {
         val nb = name.toByteArray(Charsets.UTF_8)
         val out = ByteArray(46 + nb.size + extra.size)
-        putInt(out, 0, CD_SIG)
-        putShort(out, 4, 20)                      // version made by
-        putShort(out, 6, if (method == ZipCentralDirectory.METHOD_DEFLATED) 20 else 10)
-        putShort(out, 8, 0)                       // flags
-        putShort(out, 10, method)
-        putShort(out, 12, 0)                      // mtime
-        putShort(out, 14, 0x21)                   // mdate
-        putInt(out, 16, crc.toInt())
-        putInt(out, 20, csize.toInt())
-        putInt(out, 24, fsize.toInt())
-        putShort(out, 28, nb.size)
-        putShort(out, 30, extra.size)
-        putShort(out, 32, 0)                      // comment len
-        putShort(out, 34, 0)                      // disk start
-        putShort(out, 36, 0)                      // internal attr
-        putInt(out, 38, 0)                        // external attr
-        putInt(out, 42, offset.toInt())
+        Bytes.putI32(out, 0, CD_SIG)
+        Bytes.putU16(out, 4, 20)                      // version made by
+        Bytes.putU16(out, 6, if (method == ZipCentralDirectory.METHOD_DEFLATED) 20 else 10)
+        Bytes.putU16(out, 8, 0)                       // flags
+        Bytes.putU16(out, 10, method)
+        Bytes.putU16(out, 12, 0)                      // mtime
+        Bytes.putU16(out, 14, 0x21)                   // mdate
+        Bytes.putI32(out, 16, crc.toInt())
+        Bytes.putI32(out, 20, csize.toInt())
+        Bytes.putI32(out, 24, fsize.toInt())
+        Bytes.putU16(out, 28, nb.size)
+        Bytes.putU16(out, 30, extra.size)
+        Bytes.putU16(out, 32, 0)                      // comment len
+        Bytes.putU16(out, 34, 0)                      // disk start
+        Bytes.putU16(out, 36, 0)                      // internal attr
+        Bytes.putI32(out, 38, 0)                        // external attr
+        Bytes.putI32(out, 42, offset.toInt())
         System.arraycopy(nb, 0, out, 46, nb.size)
         System.arraycopy(extra, 0, out, 46 + nb.size, extra.size)
         return out
@@ -524,14 +526,14 @@ object ZipReuse {
 
     private fun makeEocd(total: Int, cdSize: Long, cdOffset: Long): ByteArray {
         val out = ByteArray(22)
-        putInt(out, 0, EOCD_SIG)
-        putShort(out, 4, 0)                       // disk num
-        putShort(out, 6, 0)                       // cd start disk
-        putShort(out, 8, total)
-        putShort(out, 10, total)
-        putInt(out, 12, cdSize.toInt())
-        putInt(out, 16, cdOffset.toInt())
-        putShort(out, 20, 0)                      // comment len
+        Bytes.putI32(out, 0, EOCD_SIG)
+        Bytes.putU16(out, 4, 0)                       // disk num
+        Bytes.putU16(out, 6, 0)                       // cd start disk
+        Bytes.putU16(out, 8, total)
+        Bytes.putU16(out, 10, total)
+        Bytes.putI32(out, 12, cdSize.toInt())
+        Bytes.putI32(out, 16, cdOffset.toInt())
+        Bytes.putU16(out, 20, 0)                      // comment len
         return out
     }
 
@@ -556,21 +558,6 @@ object ZipReuse {
         }
     }
 
-    private fun putShort(b: ByteArray, o: Int, v: Int) {
-        b[o] = (v and 0xFF).toByte()
-        b[o + 1] = ((v shr 8) and 0xFF).toByte()
-    }
 
-    private fun putInt(b: ByteArray, o: Int, v: Int) {
-        b[o] = (v and 0xFF).toByte()
-        b[o + 1] = ((v shr 8) and 0xFF).toByte()
-        b[o + 2] = ((v shr 16) and 0xFF).toByte()
-        b[o + 3] = ((v shr 24) and 0xFF).toByte()
-    }
 
-    private fun le32(b: ByteArray, o: Int): Int =
-        (b[o].toInt() and 0xFF) or
-            ((b[o + 1].toInt() and 0xFF) shl 8) or
-            ((b[o + 2].toInt() and 0xFF) shl 16) or
-            ((b[o + 3].toInt() and 0xFF) shl 24)
 }

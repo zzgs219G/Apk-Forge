@@ -1,5 +1,7 @@
 package com.xixin.apkforge.core.apk
 
+import com.xixin.apkforge.core.HumanSize
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -582,11 +584,15 @@ class ApkInjectPipeline {
             return ((before + s * stage.weight) / TOTAL_WEIGHT).coerceIn(0f, 1f)
         }
 
-        private fun mb(bytes: Long): String = when {
-            bytes >= 1024L * 1024 -> String.format("%.1f MB", bytes / 1048576.0)
-            bytes >= 1024L -> String.format("%.0f KB", bytes / 1024.0)
-            else -> "$bytes B"
-        }
+        /**
+         * 委托给全工程唯一的 [HumanSize.format]。
+         *
+         * 原先这里有一份私有 `mb`。三处实现（这里、UncheckViewModel、
+         * UncheckScreen）阈值与小数位完全一样，改一处漏两处就会出现
+         * 「日志写 MB、界面写 KB」。保留 `mb` 这个名字只是因为调用点有 5 处，
+         * 不值得为改名去动注入线的日志输出。
+         */
+        private fun mb(bytes: Long): String = HumanSize.format(bytes)
 
         private fun bytes(n: Int): String = mb(n.toLong())
 

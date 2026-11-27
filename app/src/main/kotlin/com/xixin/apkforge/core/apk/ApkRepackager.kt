@@ -1,5 +1,7 @@
 package com.xixin.apkforge.core.apk
 
+import com.xixin.apkforge.core.Bytes
+import com.xixin.apkforge.core.Bytes.readBytesCompat
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
@@ -214,16 +216,6 @@ object ApkRepackager {
         return if (mod == 0) 0 else align - mod
     }
 
-    private fun InputStream.readBytesCompat(): ByteArray {
-        val buf = java.io.ByteArrayOutputStream(8192)
-        val tmp = ByteArray(8192)
-        while (true) {
-            val n = read(tmp)
-            if (n < 0) break
-            buf.write(tmp, 0, n)
-        }
-        return buf.toByteArray()
-    }
 
     /** APK 内所有 `classes*.dex` 的条目名，按 classes.dex, classes2.dex, ... 排序。 */
     fun listDexNames(apk: File): List<String> {
@@ -238,12 +230,15 @@ object ApkRepackager {
         }
     }
 
-    fun readEntry(apk: File, name: String): ByteArray? {
-        ZipFile(apk).use { zip ->
-            val e = zip.getEntry(name) ?: return null
-            return zip.getInputStream(e).use { it.readBytesCompat() }
-        }
-    }
+    /**
+     * 读某个条目的字节；不存在返回 null。
+     *
+     * 实现委托给 [Bytes.readEntry] —— 去签名校验那条线用的是同一份。
+     * 保留这个转发函数是因为它已有 9 个调用方（`ApkInjectPipeline` /
+     * `ClassInspector` / `PackIntegrity` / `InjectIdempotency` 等），
+     * 改调用点等于为了「看起来更整齐」去动注入线的核心，不值当。
+     */
+    fun readEntry(apk: File, name: String): ByteArray? = Bytes.readEntry(apk, name)
 
     // ────────────────────────── 对齐 ──────────────────────────
 
@@ -280,12 +275,12 @@ object ApkRepackager {
                 raf.readFully(tail)
                 var eocd = -1
                 for (i in window - EOCD_SIZE downTo 0) {
-                    if (le32(tail, i) == EOCD_SIG) { eocd = i; break }
+                    if (Bytes.i32(tail, i) == EOCD_SIG) { eocd = i; break }
                 }
                 if (eocd < 0) {
                     false
                 } else {
-                    val cdOffset = le32u(tail, eocd + 16)
+                    val cdOffset = Bytes.u32(tail, eocd + 16)
                     if (cdOffset < 16) {
                         false
                     } else {
@@ -301,16 +296,8 @@ object ApkRepackager {
         false
     }
 
-    private fun le32(b: ByteArray, at: Int): Int =
-        (b[at].toInt() and 0xFF) or
-            ((b[at + 1].toInt() and 0xFF) shl 8) or
-            ((b[at + 2].toInt() and 0xFF) shl 16) or
-            ((b[at + 3].toInt() and 0xFF) shl 24)
 
-    private fun le32u(b: ByteArray, at: Int): Long = le32(b, at).toLong() and 0xFFFFFFFFL
 
-    private fun le16(b: ByteArray, at: Int): Int =
-        (b[at].toInt() and 0xFF) or ((b[at + 1].toInt() and 0xFF) shl 8)
 
     /**
      * 源包里每个 STORED 条目的「原有对齐」。
@@ -417,12 +404,12 @@ object ApkRepackager {
 
                         var p = 0
                         while (p + 46 <= buf.size) {
-                            if (le32(buf, p) != CENTRAL_SIG) break
-                            val method = le16(buf, p + 10)
-                            val nameLen = le16(buf, p + 28)
-                            val extraLen = le16(buf, p + 30)
-                            val commentLen = le16(buf, p + 32)
-                            val localOffset = le32u(buf, p + 42)
+                            if (Bytes.i32(buf, p) != CENTRAL_SIG) break
+                            val method = Bytes.u16(buf, p + 10)
+                            val nameLen = Bytes.u16(buf, p + 28)
+                            val extraLen = Bytes.u16(buf, p + 30)
+                            val commentLen = Bytes.u16(buf, p + 32)
+                            val localOffset = Bytes.u32(buf, p + 42)
                             val name = String(buf, p + 46, nameLen, Charsets.UTF_8)
 
                             // 回读 local header 只为拿它自己的 extraLen
@@ -430,8 +417,8 @@ object ApkRepackager {
                             raf.seek(localOffset)
                             val lh = ByteArray(LOCAL_HEADER_SIZE)
                             raf.readFully(lh)
-                            val localExtraLen = le16(lh, 28)
-                            val localNameLen = le16(lh, 26)
+                            val localExtraLen = Bytes.u16(lh, 28)
+                            val localNameLen = Bytes.u16(lh, 26)
                             raf.seek(saved)
 
                             offsets[name] = localOffset + LOCAL_HEADER_SIZE + localNameLen + localExtraLen
@@ -460,12 +447,12 @@ object ApkRepackager {
 
                 var eocd = -1
                 for (i in window - EOCD_SIZE downTo 0) {
-                    if (le32(tail, i) == EOCD_SIG) { eocd = i; break }
+                    if (Bytes.i32(tail, i) == EOCD_SIG) { eocd = i; break }
                 }
                 if (eocd < 0) return null
 
-                val cdSize = le32u(tail, eocd + 12)
-                val cdOffsetRaw = le32u(tail, eocd + 16)
+                val cdSize = Bytes.u32(tail, eocd + 12)
+                val cdOffsetRaw = Bytes.u32(tail, eocd + 16)
                 if (cdSize == 0L || cdSize > Int.MAX_VALUE) return null
 
                 // 自解压 / 前置数据的包里，EOCD 记的偏移是相对 zip 起点的，

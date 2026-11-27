@@ -1,5 +1,6 @@
 package com.xixin.apkforge.core.uncheck
 
+import com.xixin.apkforge.core.Bytes
 import com.xixin.apkforge.core.apk.ApkSigningBlock
 import com.xixin.apkforge.core.apk.ZipCentralDirectory
 import com.xixin.apkforge.core.axml.AxmlBoolean
@@ -112,7 +113,7 @@ class UncheckPipelineTest {
         assertTrue("缺 armv7 .so", names.contains(UncheckPayload.LIB_ARM32))
 
         // 落点 6：Manifest 指向 SigFixApp
-        val mf = readEntry(out, UncheckPayload.MANIFEST)!!
+        val mf = Bytes.readEntry(out, UncheckPayload.MANIFEST)!!
         assertEquals(
             "android:name 没指向 SigFixApp —— 载荷永不执行",
             UncheckPayload.SIGFIX_APP,
@@ -236,7 +237,7 @@ class UncheckPipelineTest {
         val out = File(work, "out.apk")
         val result = UncheckPipeline.run(apk, out, fakePayload(), workDir = work)
 
-        val json = String(readEntry(out, UncheckPayload.ASSET_CONFIG)!!, Charsets.UTF_8)
+        val json = String(Bytes.readEntry(out, UncheckPayload.ASSET_CONFIG)!!, Charsets.UTF_8)
         assertTrue("缺 cert 字段: $json", json.contains("\"cert\":\""))
         assertTrue("缺 originalApp 字段: $json", json.contains("\"originalApp\":\""))
 
@@ -358,7 +359,7 @@ class UncheckPipelineTest {
 
         // 默认档位
         UncheckPipeline.run(apk, out, fakePayload(), workDir = work)
-        val json = String(readEntry(out, UncheckPayload.ASSET_CONFIG)!!, Charsets.UTF_8)
+        val json = String(Bytes.readEntry(out, UncheckPayload.ASSET_CONFIG)!!, Charsets.UTF_8)
         val lv = Regex(""""hookLevel"\s*:\s*(\d+)""")
             .find(json)?.groupValues?.get(1)?.toIntOrNull()
         assertNotNull("sigfix.json 必须有 hookLevel 字段（缺了会静默用默认值）: $json", lv)
@@ -409,7 +410,7 @@ class UncheckPipelineTest {
             apk, out, fakePayload(), workDir = work,
             hookLevel = UncheckPipeline.HookLevel.CORE,
         )
-        val json = String(readEntry(out, UncheckPayload.ASSET_CONFIG)!!, Charsets.UTF_8)
+        val json = String(Bytes.readEntry(out, UncheckPayload.ASSET_CONFIG)!!, Charsets.UTF_8)
         assertTrue(
             "指定 CORE(1) 应原样落进 sigfix.json，实际: $json",
             json.contains("\"hookLevel\":1"),
@@ -453,7 +454,7 @@ class UncheckPipelineTest {
         assertTrue("缺 origin.apk", names.contains(UncheckPayload.ASSET_ORIGIN))
 
         // Manifest 必须仍指向 SigFixApp（Java 层靠它挂载）
-        val mf = readEntry(out, UncheckPayload.MANIFEST)!!
+        val mf = Bytes.readEntry(out, UncheckPayload.MANIFEST)!!
         assertEquals(UncheckPayload.SIGFIX_APP, AxmlEditor.getAppName(mf))
 
         // 结果要如实报告
@@ -472,7 +473,7 @@ class UncheckPipelineTest {
     @Test
     fun `只做 Java 层时保留原 extractNativeLibs 值`() {
         val apk = locateApk() ?: return
-        val srcMf = readEntry(apk, UncheckPayload.MANIFEST)!!
+        val srcMf = Bytes.readEntry(apk, UncheckPayload.MANIFEST)!!
         val srcValue = AxmlBoolean.getExtractNativeLibs(srcMf)
 
         val work = workDir("java-only-libs")
@@ -480,7 +481,7 @@ class UncheckPipelineTest {
         UncheckPipeline.run(apk, out, fakePayload(), workDir = work, nativeLayer = false)
 
         val outValue = AxmlBoolean.getExtractNativeLibs(
-            readEntry(out, UncheckPayload.MANIFEST)!!
+            Bytes.readEntry(out, UncheckPayload.MANIFEST)!!
         )
         assertEquals(
             "只做 Java 层时不该动 extractNativeLibs（原包 $srcValue）",
@@ -585,7 +586,7 @@ class UncheckPipelineTest {
         val result = UncheckPipeline.run(apk, out, fakePayload(), workDir = work)
 
         // 产物里必须最终是 true，不管原来是哪种形态
-        val mf = readEntry(out, UncheckPayload.MANIFEST)!!
+        val mf = Bytes.readEntry(out, UncheckPayload.MANIFEST)!!
         assertEquals(true, AxmlBoolean.getExtractNativeLibs(mf))
         // 报告的形态必须是三者之一
         assertTrue(
@@ -601,9 +602,4 @@ class UncheckPipelineTest {
 
     // ── 辅助 ─────────────────────────────────────────────────
 
-    private fun readEntry(apk: File, name: String): ByteArray? =
-        ZipFile(apk).use { zf ->
-            val e = zf.getEntry(name) ?: return null
-            zf.getInputStream(e).use { it.readBytes() }
-        }
 }

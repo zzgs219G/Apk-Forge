@@ -1,5 +1,7 @@
 package com.xixin.apkforge.feature.uncheck
 
+import com.xixin.apkforge.core.HumanSize
+
 import android.app.Application
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -274,10 +276,10 @@ class UncheckViewModel(app: Application) : AndroidViewModel(app) {
         append("证书指纹 ").append(r.certSha256Short).append('\n')
         append("新 dex ").append(r.newDex).append('\n')
         r.originalApp?.let { append("原 Application ").append(it).append('\n') }
-        append("体积 ").append(humanSize(r.sourceSize))
-            .append(" → ").append(humanSize(r.outputSize))
+        append("体积 ").append(HumanSize.format(r.sourceSize))
+            .append(" → ").append(HumanSize.format(r.outputSize))
         if (r.savedByReuse > 0) {
-            append("（复用省 ").append(humanSize(r.savedByReuse)).append("）")
+            append("（复用省 ").append(HumanSize.format(r.savedByReuse)).append("）")
         }
         if (!r.nativeCapable) {
             append("\n⚠️ 原包无 v2/v3 签名块：只覆盖 PackageManager 类校验")
@@ -301,9 +303,4 @@ class UncheckViewModel(app: Application) : AndroidViewModel(app) {
     private fun buildOutputName(input: File): String =
         "${input.name.removeSuffix(".apk")}_unchecked.apk"
 
-    private fun humanSize(bytes: Long): String = when {
-        bytes >= 1024 * 1024 -> String.format("%.1f MB", bytes / 1024.0 / 1024.0)
-        bytes >= 1024 -> String.format("%.0f KB", bytes / 1024.0)
-        else -> "$bytes B"
-    }
 }

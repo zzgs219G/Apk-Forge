@@ -1,5 +1,7 @@
 package com.xixin.apkforge.core.axml
 
+import com.xixin.apkforge.core.Bytes
+
 /**
  * 二进制 AXML 的**布尔属性**原位改写（等长，不重建字符串池）。
  *
@@ -87,7 +89,7 @@ object AxmlBoolean {
                 if (value != 0) return manifest to Outcome.ALREADY_ON
                 // 原位改成 true：只写这 4 字节，长度与偏移全不变
                 val out = manifest.copyOf()
-                putInt(out, dataOff, 0xFFFFFFFF.toInt())
+                Bytes.putI32(out, dataOff, 0xFFFFFFFF.toInt())
                 return out to Outcome.FLIPPED
             }
         }
@@ -120,9 +122,9 @@ object AxmlBoolean {
     private fun parsePoolOrNull(data: ByteArray): Pool? {
         var off = 8
         while (off + 8 <= data.size) {
-            val type = getShort(data, off)
-            val headerSize = getShort(data, off + 2)
-            val size = getInt(data, off + 4)
+            val type = Bytes.u16(data, off)
+            val headerSize = Bytes.u16(data, off + 2)
+            val size = Bytes.i32(data, off + 4)
             if (size < 8 || off + size > data.size) return null
             if (type == RES_STRING_POOL_TYPE) {
                 return Pool(off, headerSize, size, readStrings(data, off))
@@ -133,17 +135,17 @@ object AxmlBoolean {
     }
 
     private fun readStrings(data: ByteArray, off: Int): List<String> {
-        val count = getInt(data, off + 8)
-        val flags = getInt(data, off + 16)
-        val stringsStart = getInt(data, off + 20)
+        val count = Bytes.i32(data, off + 8)
+        val flags = Bytes.i32(data, off + 16)
+        val stringsStart = Bytes.i32(data, off + 20)
         val utf8 = (flags and 0x100) != 0
         if (count <= 0 || count > 1_000_000) return emptyList()
 
         val base = off + stringsStart
-        val end = off + getInt(data, off + 4)
+        val end = off + Bytes.i32(data, off + 4)
         val out = ArrayList<String>(count)
         for (i in 0 until count) {
-            val p = base + getInt(data, off + 28 + i * 4)
+            val p = base + Bytes.i32(data, off + 28 + i * 4)
             out += try {
                 if (utf8) readUtf8(data, p, end) else readUtf16(data, p, end)
             } catch (_: Exception) {
@@ -172,10 +174,10 @@ object AxmlBoolean {
 
     private fun readUtf16(data: ByteArray, start: Int, limit: Int): String {
         var p = start
-        var n = getShort(data, p)
+        var n = Bytes.u16(data, p)
         p += 2
         if (n and 0x8000 != 0) {
-            n = ((n and 0x7FFF) shl 16) or getShort(data, p)
+            n = ((n and 0x7FFF) shl 16) or Bytes.u16(data, p)
             p += 2
         }
         val safe = minOf(n, (minOf(limit, data.size) - p) / 2)
@@ -187,12 +189,12 @@ object AxmlBoolean {
     private fun findApplicationOffset(data: ByteArray, pool: Pool): Int? {
         var off = 8
         while (off + 8 <= data.size) {
-            val type = getShort(data, off)
-            val headerSize = getShort(data, off + 2)
-            val size = getInt(data, off + 4)
+            val type = Bytes.u16(data, off)
+            val headerSize = Bytes.u16(data, off + 2)
+            val size = Bytes.i32(data, off + 4)
             if (size < 8 || off + size > data.size) return null
             if (type == RES_XML_START_ELEMENT_TYPE) {
-                val nameIdx = getInt(data, off + headerSize + 4)
+                val nameIdx = Bytes.i32(data, off + headerSize + 4)
                 if (pool.strings.getOrNull(nameIdx) == "application") return off
             }
             off += size
@@ -206,17 +208,17 @@ object AxmlBoolean {
      * @return (data 字段绝对偏移, 当前值) 或 null
      */
     private fun findBooleanAttr(data: ByteArray, elemOff: Int, nameIdx: Int): Pair<Int, Int>? {
-        val headerSize = getShort(data, elemOff + 2)
-        val attrStart = getShort(data, elemOff + headerSize + 8)
-        val attrSize = getShort(data, elemOff + headerSize + 10)
-        val attrCount = getShort(data, elemOff + headerSize + 12)
+        val headerSize = Bytes.u16(data, elemOff + 2)
+        val attrStart = Bytes.u16(data, elemOff + headerSize + 8)
+        val attrSize = Bytes.u16(data, elemOff + headerSize + 10)
+        val attrCount = Bytes.u16(data, elemOff + headerSize + 12)
         if (attrSize < 20) return null
 
         val base = elemOff + headerSize + attrStart
         for (i in 0 until attrCount) {
             val p = base + i * attrSize
             if (p + 20 > data.size) break
-            if (getInt(data, p + 4) != nameIdx) continue
+            if (Bytes.i32(data, p + 4) != nameIdx) continue
             val dataType = data[p + 15].toInt() and 0xFF
             if (dataType != TYPE_INT_BOOLEAN) {
                 throw AxmlBooleanException(
@@ -224,26 +226,13 @@ object AxmlBoolean {
                         "不支持原位改写"
                 )
             }
-            return (p + 16) to getInt(data, p + 16)
+            return (p + 16) to Bytes.i32(data, p + 16)
         }
         return null
     }
 
     // ── 小端读写 ─────────────────────────────────────────────
 
-    private fun getShort(b: ByteArray, o: Int): Int =
-        (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8)
 
-    private fun getInt(b: ByteArray, o: Int): Int =
-        (b[o].toInt() and 0xFF) or
-            ((b[o + 1].toInt() and 0xFF) shl 8) or
-            ((b[o + 2].toInt() and 0xFF) shl 16) or
-            ((b[o + 3].toInt() and 0xFF) shl 24)
 
-    private fun putInt(b: ByteArray, o: Int, v: Int) {
-        b[o] = (v and 0xFF).toByte()
-        b[o + 1] = ((v shr 8) and 0xFF).toByte()
-        b[o + 2] = ((v shr 16) and 0xFF).toByte()
-        b[o + 3] = ((v shr 24) and 0xFF).toByte()
-    }
 }

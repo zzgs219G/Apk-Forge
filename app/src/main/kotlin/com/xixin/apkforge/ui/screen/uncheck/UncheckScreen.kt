@@ -1,5 +1,7 @@
 package com.xixin.apkforge.ui.screen.uncheck
 
+import com.xixin.apkforge.core.HumanSize
+
 import androidx.compose.material3.Switch
 import com.xixin.apkforge.core.uncheck.UncheckPipeline
 import com.xixin.apkforge.ui.lifted.components.select.ToolSegmentedOptions
@@ -266,7 +268,7 @@ private fun TaskHeader(state: UncheckUiState, modifier: Modifier = Modifier) {
                         state.meta?.versionName?.let { "v$it" },
                         if (state.readingMeta) "读取中…" else null,
                     ).joinToString(" · ").ifBlank {
-                        humanSize(state.inputSize)
+                        HumanSize.format(state.inputSize)
                     },
                     style = MaterialTheme.typography.labelSmall.copy(
                         fontFamily = FontFamily.Monospace
@@ -314,14 +316,14 @@ private fun TaskHeader(state: UncheckUiState, modifier: Modifier = Modifier) {
                 )
                 HGap(8.dp)
                 Text(
-                    "完成 · ${humanSize(r.outputSize)}",
+                    "完成 · ${HumanSize.format(r.outputSize)}",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.weight(1f),
                 )
                 if (r.savedByReuse > 0) {
                     Text(
-                        "复用省 ${humanSize(r.savedByReuse)}",
+                        "复用省 ${HumanSize.format(r.savedByReuse)}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -495,8 +497,3 @@ private fun NativeLayerRow(
     }
 }
 
-private fun humanSize(bytes: Long): String = when {
-    bytes >= 1024 * 1024 -> String.format("%.1f MB", bytes / 1024.0 / 1024.0)
-    bytes >= 1024 -> String.format("%.0f KB", bytes / 1024.0)
-    else -> "$bytes B"
-}

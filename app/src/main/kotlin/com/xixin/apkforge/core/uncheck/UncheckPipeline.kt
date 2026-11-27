@@ -1,5 +1,6 @@
 package com.xixin.apkforge.core.uncheck
 
+import com.xixin.apkforge.core.Bytes
 import com.xixin.apkforge.core.apk.ApkSigningBlock
 import com.xixin.apkforge.core.apk.ZipCentralDirectory
 import com.xixin.apkforge.core.axml.AxmlBoolean
@@ -161,7 +162,7 @@ object UncheckPipeline {
             }
             progress.on("dex 清单", dexNames.joinToString(", "))
 
-            val manifestBytes = readEntry(input, UncheckPayload.MANIFEST)
+            val manifestBytes = Bytes.readEntry(input, UncheckPayload.MANIFEST)
                 ?: throw PipelineException("APK 里没有 ${UncheckPayload.MANIFEST}")
 
             val parsed = try {
@@ -535,7 +536,7 @@ object UncheckPipeline {
         }
 
         // 2) Manifest 必须真的指向 SigFixApp
-        val mf = readEntry(apk, UncheckPayload.MANIFEST)
+        val mf = Bytes.readEntry(apk, UncheckPayload.MANIFEST)
             ?: throw IllegalStateException("产物里没有 Manifest")
         val app = AxmlEditor.getAppName(mf)
         if (app != UncheckPayload.SIGFIX_APP) {
@@ -553,13 +554,13 @@ object UncheckPipeline {
         }
 
         // 4) 新 dex 必须是合法 dex
-        val dex = readEntry(apk, newDex) ?: ByteArray(0)
+        val dex = Bytes.readEntry(apk, newDex) ?: ByteArray(0)
         if (dex.size < 8 || String(dex, 0, 4, Charsets.US_ASCII) != "dex\n") {
             throw IllegalStateException("$newDex 不是合法 dex")
         }
 
         // 5) 配置大小与写入的一致
-        val cfg = readEntry(apk, UncheckPayload.ASSET_CONFIG) ?: ByteArray(0)
+        val cfg = Bytes.readEntry(apk, UncheckPayload.ASSET_CONFIG) ?: ByteArray(0)
         if (cfg.size != configSize) {
             throw IllegalStateException(
                 "${UncheckPayload.ASSET_CONFIG} 大小不符：期望 $configSize，实际 ${cfg.size}"
@@ -603,13 +604,6 @@ object UncheckPipeline {
     }
 
     // ── 工具 ──────────────────────────────────────────────────
-
-    private fun readEntry(apk: File, name: String): ByteArray? {
-        ZipFile(apk).use { zf ->
-            val e = zf.getEntry(name) ?: return null
-            return zf.getInputStream(e).use { it.readBytes() }
-        }
-    }
 
     /** `classes.dex` 视为 1，取最大序号 +1，绝不占已有名字。 */
     internal fun nextDexName(existing: List<String>): String {

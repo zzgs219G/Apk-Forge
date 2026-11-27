@@ -1,5 +1,7 @@
 package com.xixin.apkforge.core.uncheck
 
+import com.xixin.apkforge.core.Bytes
+
 import java.io.File
 import java.io.RandomAccessFile
 
@@ -79,9 +81,9 @@ object CertExtractor {
             raf.readFully(tail)
             var eocd = -1
             for (i in window - EOCD_SIZE downTo 0) {
-                if (le32(tail, i) == EOCD_SIG) {
+                if (Bytes.i32(tail, i) == EOCD_SIG) {
                     // 校验注释长度字段与文件尾一致，防误命中
-                    val commentLen = le16(tail, i + 20)
+                    val commentLen = Bytes.u16(tail, i + 20)
                     if (i + EOCD_SIZE + commentLen == window) {
                         eocd = i
                         break
@@ -90,7 +92,7 @@ object CertExtractor {
             }
             if (eocd < 0) throw CertException("找不到 EOCD（不是合法 ZIP/APK）")
 
-            val cdOffset = le32(tail, eocd + 16)
+            val cdOffset = Bytes.i32(tail, eocd + 16)
             if (cdOffset <= 0 || cdOffset >= len) {
                 throw CertException("central directory 偏移异常: $cdOffset")
             }
@@ -110,7 +112,7 @@ object CertExtractor {
             val sizeTotalBytes = ByteArray(8)
             raf.seek((cdOffset - 24).toLong())
             raf.readFully(sizeTotalBytes)
-            val sizeTotal = le64(sizeTotalBytes, 0)
+            val sizeTotal = Bytes.i64(sizeTotalBytes, 0)
             if (sizeTotal + 8 > cdOffset.toLong()) {
                 throw CertException("Signing Block 大小异常: $sizeTotal")
             }
@@ -125,8 +127,8 @@ object CertExtractor {
                 val head = ByteArray(12)
                 raf.seek(pos)
                 raf.readFully(head)
-                val pairLen = le64(head, 0)
-                val id = le32(head, 8)
+                val pairLen = Bytes.i64(head, 0)
+                val id = Bytes.i32(head, 8)
                 if (pairLen < 4 || pos + 8 + pairLen > pairsEnd) break
                 if (id == V3_BLOCK_ID || id == V2_BLOCK_ID) {
                     val value = ByteArray((pairLen - 4).toInt())
@@ -162,7 +164,7 @@ object CertExtractor {
 
         fun readLenPrefixed(): ByteArray? {
             if (p + 4 > value.size) return null
-            val n = le32(value, p)
+            val n = Bytes.i32(value, p)
             p += 4
             if (n < 0 || p + n > value.size) return null
             val out = value.copyOfRange(p, p + n)
@@ -177,7 +179,7 @@ object CertExtractor {
 
         fun readFrom(src: ByteArray): ByteArray? {
             if (q + 4 > src.size) return null
-            val n = le32(src, q)
+            val n = Bytes.i32(src, q)
             q += 4
             if (n < 0 || q + n > src.size) return null
             val out = src.copyOfRange(q, q + n)
@@ -196,20 +198,6 @@ object CertExtractor {
     }
 
     // ── 小端读取 ─────────────────────────────────────────────
-    private fun le16(b: ByteArray, o: Int): Int =
-        (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8)
 
-    private fun le32(b: ByteArray, o: Int): Int =
-        (b[o].toInt() and 0xFF) or
-            ((b[o + 1].toInt() and 0xFF) shl 8) or
-            ((b[o + 2].toInt() and 0xFF) shl 16) or
-            ((b[o + 3].toInt() and 0xFF) shl 24)
 
-    private fun le64(b: ByteArray, o: Int): Long {
-        var r = 0L
-        for (i in 7 downTo 0) {
-            r = (r shl 8) or (b[o + i].toLong() and 0xFF)
-        }
-        return r
-    }
 }

@@ -1,5 +1,7 @@
 package com.xixin.apkforge.core.apk
 
+import com.xixin.apkforge.core.Bytes
+
 import java.io.File
 import java.io.RandomAccessFile
 
@@ -99,8 +101,8 @@ object ZipCentralDirectory {
 
             var eocdRel = -1
             for (i in window - EOCD_SIZE downTo 0) {
-                if (le32(tail, i) == EOCD_SIG) {
-                    val commentLen = le16(tail, i + 20)
+                if (Bytes.i32(tail, i) == EOCD_SIG) {
+                    val commentLen = Bytes.u16(tail, i + 20)
                     if (i + EOCD_SIZE + commentLen == window) {
                         eocdRel = i
                         break
@@ -110,8 +112,8 @@ object ZipCentralDirectory {
             if (eocdRel < 0) throw IllegalArgumentException("找不到 EOCD: ${apk.name}")
 
             val eocdAbs = len - window + eocdRel
-            val cdSize = le32u(tail, eocdRel + 12)
-            val cdOffsetRaw = le32u(tail, eocdRel + 16)
+            val cdSize = Bytes.u32(tail, eocdRel + 12)
+            val cdOffsetRaw = Bytes.u32(tail, eocdRel + 16)
             if (cdSize == 0L || cdSize > Int.MAX_VALUE) {
                 throw IllegalArgumentException("中央目录大小异常 ($cdSize): ${apk.name}")
             }
@@ -130,15 +132,15 @@ object ZipCentralDirectory {
             val entries = ArrayList<Entry>()
             var p = 0
             while (p + 46 <= cd.size) {
-                if (le32(cd, p) != CD_SIG) break
-                val method = le16(cd, p + 10)
-                val crc = le32u(cd, p + 16)
-                val csize = le32u(cd, p + 20)
-                val fsize = le32u(cd, p + 24)
-                val nameLen = le16(cd, p + 28)
-                val extraLen = le16(cd, p + 30)
-                val commentLen = le16(cd, p + 32)
-                val headerOffset = le32u(cd, p + 42)
+                if (Bytes.i32(cd, p) != CD_SIG) break
+                val method = Bytes.u16(cd, p + 10)
+                val crc = Bytes.u32(cd, p + 16)
+                val csize = Bytes.u32(cd, p + 20)
+                val fsize = Bytes.u32(cd, p + 24)
+                val nameLen = Bytes.u16(cd, p + 28)
+                val extraLen = Bytes.u16(cd, p + 30)
+                val commentLen = Bytes.u16(cd, p + 32)
+                val headerOffset = Bytes.u32(cd, p + 42)
                 if (p + 46 + nameLen > cd.size) break
                 val name = String(cd, p + 46, nameLen, Charsets.UTF_8)
 
@@ -147,10 +149,10 @@ object ZipCentralDirectory {
                 val lh = ByteArray(LFH_SIZE)
                 raf.seek(prefix + headerOffset)
                 raf.readFully(lh)
-                if (le32(lh, 0) != LFH_SIG) {
+                if (Bytes.i32(lh, 0) != LFH_SIG) {
                     throw IllegalArgumentException("local header 非法 ($name): ${apk.name}")
                 }
-                val dataOffset = prefix + headerOffset + LFH_SIZE + le16(lh, 26) + le16(lh, 28)
+                val dataOffset = prefix + headerOffset + LFH_SIZE + Bytes.u16(lh, 26) + Bytes.u16(lh, 28)
 
                 entries += Entry(
                     name = name,
@@ -186,17 +188,4 @@ object ZipCentralDirectory {
         }
         return out
     }
-
-    // ── 小端读取 ─────────────────────────────────────────────
-
-    internal fun le16(b: ByteArray, o: Int): Int =
-        (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8)
-
-    internal fun le32(b: ByteArray, o: Int): Int =
-        (b[o].toInt() and 0xFF) or
-            ((b[o + 1].toInt() and 0xFF) shl 8) or
-            ((b[o + 2].toInt() and 0xFF) shl 16) or
-            ((b[o + 3].toInt() and 0xFF) shl 24)
-
-    internal fun le32u(b: ByteArray, o: Int): Long = le32(b, o).toLong() and 0xFFFFFFFFL
 }

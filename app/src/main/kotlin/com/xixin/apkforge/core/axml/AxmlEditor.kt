@@ -1,5 +1,7 @@
 package com.xixin.apkforge.core.axml
 
+import com.xixin.apkforge.core.Bytes
+
 import java.io.File
 
 /**
@@ -108,7 +110,7 @@ object AxmlEditor {
 
             val offsetsBlob = ByteArray(offsets.size * 4)
             for (i in offsets.indices) {
-                putInt(offsetsBlob, i * 4, offsets[i])
+                Bytes.putI32(offsetsBlob, i * 4, offsets[i])
             }
 
             val headerSize = 28
@@ -117,14 +119,14 @@ object AxmlEditor {
             val totalSize = stringsStart + padded.size
 
             val out = ByteArray(totalSize)
-            putShort(out, 0, RES_STRING_POOL_TYPE)
-            putShort(out, 2, headerSize)
-            putInt(out, 4, totalSize)
-            putInt(out, 8, strings.size)
-            putInt(out, 12, styleCount)
-            putInt(out, 16, flags)
-            putInt(out, 20, stringsStart)
-            putInt(out, 24, stylesStart)
+            Bytes.putU16(out, 0, RES_STRING_POOL_TYPE)
+            Bytes.putU16(out, 2, headerSize)
+            Bytes.putI32(out, 4, totalSize)
+            Bytes.putI32(out, 8, strings.size)
+            Bytes.putI32(out, 12, styleCount)
+            Bytes.putI32(out, 16, flags)
+            Bytes.putI32(out, 20, stringsStart)
+            Bytes.putI32(out, 24, stylesStart)
             System.arraycopy(offsetsBlob, 0, out, headerSize, offsetsBlob.size)
             System.arraycopy(styleData, 0, out, headerSize + offsetsBlob.size, styleData.size)
             System.arraycopy(padded, 0, out, stringsStart, padded.size)
@@ -178,12 +180,12 @@ object AxmlEditor {
         val el = findApplication(data, pool) ?: return null
         for (i in 0 until el.attrCount) {
             val p = el.off + el.headerSize + el.attrStart + i * el.attrSize
-            val nsIdx = getInt(data, p)
-            val nameIdx = getInt(data, p + 4)
+            val nsIdx = Bytes.i32(data, p)
+            val nameIdx = Bytes.i32(data, p + 4)
             if (pool.strings[nameIdx] != "name") continue
             if (pool.strings[nsIdx] != ANDROID_NS) continue
-            val raw = getInt(data, p + 8)
-            val typedData = getInt(data, p + 16)
+            val raw = Bytes.i32(data, p + 8)
+            val typedData = Bytes.i32(data, p + 16)
             val idx = if (raw != NO_INDEX) raw else typedData
             return pool.strings.getOrNull(idx)
         }
@@ -196,7 +198,7 @@ object AxmlEditor {
      * @throws AxmlException 不是合法 AXML、找不到 `<application>`、或结构异常
      */
     fun setAppName(data: ByteArray, newClass: String): ByteArray {
-        if (data.size < 8 || getShort(data, 0) != RES_XML_TYPE) {
+        if (data.size < 8 || Bytes.u16(data, 0) != RES_XML_TYPE) {
             throw AxmlException("不是二进制 AXML（文件头不是 0x0003）")
         }
         loadResMap(data)
@@ -208,8 +210,8 @@ object AxmlEditor {
         var existingIdx = -1
         for (i in 0 until el.attrCount) {
             val p = el.off + el.headerSize + el.attrStart + i * el.attrSize
-            val nsIdx = getInt(data, p)
-            val nameIdx = getInt(data, p + 4)
+            val nsIdx = Bytes.i32(data, p)
+            val nameIdx = Bytes.i32(data, p + 4)
             if (nameIdx < pool.strings.size && nsIdx < pool.strings.size &&
                 pool.strings[nameIdx] == "name" && pool.strings[nsIdx] == ANDROID_NS
             ) {
@@ -221,7 +223,7 @@ object AxmlEditor {
         // 幂等：已经是目标值就原样返回
         if (existingIdx >= 0) {
             val p = el.off + el.headerSize + el.attrStart + existingIdx * el.attrSize
-            val raw = getInt(data, p + 8)
+            val raw = Bytes.i32(data, p + 8)
             if (raw != NO_INDEX && pool.strings.getOrNull(raw) == newClass) {
                 return data
             }
@@ -278,7 +280,7 @@ object AxmlEditor {
         attrResourceId: Int,
         value: Boolean,
     ): ByteArray {
-        if (data.size < 8 || getShort(data, 0) != RES_XML_TYPE) {
+        if (data.size < 8 || Bytes.u16(data, 0) != RES_XML_TYPE) {
             throw AxmlException("不是二进制 AXML（文件头不是 0x0003）")
         }
         loadResMap(data)
@@ -294,8 +296,8 @@ object AxmlEditor {
         // 已存在同名（且属于 android 命名空间）→ 原位改值，不扩池不后移
         for (i in 0 until el.attrCount) {
             val p = el.off + el.headerSize + el.attrStart + i * el.attrSize
-            if (getInt(data, p + 4) != nameIdx) continue
-            val nsIdx = getInt(data, p)
+            if (Bytes.i32(data, p + 4) != nameIdx) continue
+            val nsIdx = Bytes.i32(data, p)
             if (nsIdx >= 0 && pool.strings.getOrNull(nsIdx) != ANDROID_NS) continue
             val existingType = data[p + 15].toInt() and 0xFF
             if (existingType != TYPE_INT_BOOLEAN) {
@@ -303,11 +305,11 @@ object AxmlEditor {
                     "$attrName 已是别的类型（0x${existingType.toString(16)}），不做跨类型改写"
                 )
             }
-            val cur = getInt(data, p + 16)
+            val cur = Bytes.i32(data, p + 16)
             val want = if (value) 0xFFFFFFFF.toInt() else 0
             if (cur == want) return data
             val out = data.copyOf()
-            putInt(out, p + 16, want)
+            Bytes.putI32(out, p + 16, want)
             return out
         }
 
@@ -358,7 +360,7 @@ object AxmlEditor {
         val count = (resMapChunk.size - resMapChunk.headerSize) / 4
         if (count > nameIdx) {
             val at = resMapChunk.off + resMapChunk.headerSize + nameIdx * 4
-            val existing = getInt(data, at)
+            val existing = Bytes.i32(data, at)
             if (existing != 0 && existing != resId) {
                 throw AxmlException(
                     "resource map 冲突：索引 $nameIdx 已映射到 " +
@@ -367,7 +369,7 @@ object AxmlEditor {
             }
             if (existing == resId) return data
             val out = data.copyOf()
-            putInt(out, at, resId)
+            Bytes.putI32(out, at, resId)
             return out
         }
 
@@ -383,9 +385,9 @@ object AxmlEditor {
         // 新增槽位全 0（表示「无资源 ID」），tail 后移
         System.arraycopy(tail, 0, out, head.size + grow, tail.size)
 
-        putInt(out, resMapChunk.off + 4, resMapChunk.size + grow)
-        putInt(out, resMapChunk.off + resMapChunk.headerSize + nameIdx * 4, resId)
-        putInt(out, 4, out.size)   // 文件头总大小
+        Bytes.putI32(out, resMapChunk.off + 4, resMapChunk.size + grow)
+        Bytes.putI32(out, resMapChunk.off + resMapChunk.headerSize + nameIdx * 4, resId)
+        Bytes.putI32(out, 4, out.size)   // 文件头总大小
         return out
     }
 
@@ -418,13 +420,13 @@ object AxmlEditor {
         val insertAt = newElemOff + el.headerSize + el.attrStart + insIndex * el.attrSize
 
         val attr = ByteArray(20)
-        putInt(attr, 0, nsIdx)                    // ns
-        putInt(attr, 4, nameIdx)                  // name
-        putInt(attr, 8, NO_INDEX)                 // rawValue：布尔属性没有原文
-        putShort(attr, 12, 8)                     // typedValue.size
+        Bytes.putI32(attr, 0, nsIdx)                    // ns
+        Bytes.putI32(attr, 4, nameIdx)                  // name
+        Bytes.putI32(attr, 8, NO_INDEX)                 // rawValue：布尔属性没有原文
+        Bytes.putU16(attr, 12, 8)                     // typedValue.size
         attr[14] = 0                              // res0
         attr[15] = TYPE_INT_BOOLEAN.toByte()      // 0x12
-        putInt(attr, 16, if (value) 0xFFFFFFFF.toInt() else 0)
+        Bytes.putI32(attr, 16, if (value) 0xFFFFFFFF.toInt() else 0)
 
         val merged = ByteArray(rest.size + 20)
         System.arraycopy(rest, 0, merged, 0, insertAt)
@@ -432,8 +434,8 @@ object AxmlEditor {
         System.arraycopy(rest, insertAt, merged, insertAt + 20, rest.size - insertAt)
 
         val countOff = newElemOff + el.headerSize + 8 + 4
-        putShort(merged, countOff, el.attrCount + 1)
-        putInt(merged, newElemOff + 4, el.size + 20)
+        Bytes.putU16(merged, countOff, el.attrCount + 1)
+        Bytes.putI32(merged, newElemOff + 4, el.size + 20)
 
         return assemble(data, newPool, merged, delta)
     }
@@ -454,11 +456,11 @@ object AxmlEditor {
 
         val p = newElemOff + el.headerSize + el.attrStart + attrIndex * el.attrSize
         // 与 appendAttr 同一形态：rawValue=NO_INDEX、typedValue 为字符串索引
-        putInt(rest, p + 8, valueIdx)
-        putShort(rest, p + 12, 8)
+        Bytes.putI32(rest, p + 8, valueIdx)
+        Bytes.putU16(rest, p + 12, 8)
         rest[p + 14] = 0
         rest[p + 15] = TYPE_STRING.toByte()
-        putInt(rest, p + 16, valueIdx)
+        Bytes.putI32(rest, p + 16, valueIdx)
 
         return assemble(data, newPool, rest, delta)
     }
@@ -497,13 +499,13 @@ object AxmlEditor {
         // 属性的身份（这里是 android:name）由 chunk 0x0180 的 resource map
         // 把 name 索引映射到 0x01010003 决定，不需要把资源 ID 塞进 typedValue。
         val attr = ByteArray(20)
-        putInt(attr, 0, nsIdx)
-        putInt(attr, 4, nameIdx)
-        putInt(attr, 8, valueIdx)   // rawValue = 字符串索引（实测 MT 的正确形态）
-        putShort(attr, 12, 8)              // typedValue.size
+        Bytes.putI32(attr, 0, nsIdx)
+        Bytes.putI32(attr, 4, nameIdx)
+        Bytes.putI32(attr, 8, valueIdx)   // rawValue = 字符串索引（实测 MT 的正确形态）
+        Bytes.putU16(attr, 12, 8)              // typedValue.size
         attr[14] = 0                        // res0
         attr[15] = TYPE_STRING.toByte()
-        putInt(attr, 16, valueIdx)
+        Bytes.putI32(attr, 16, valueIdx)
 
         val merged = ByteArray(rest.size + 20)
         System.arraycopy(rest, 0, merged, 0, insertAt)
@@ -512,9 +514,9 @@ object AxmlEditor {
 
         // attrCount +1（在 START_ELEMENT body 里，偏移 headerSize+8+4）
         val countOff = newElemOff + el.headerSize + 8 + 4
-        putShort(merged, countOff, el.attrCount + 1)
+        Bytes.putU16(merged, countOff, el.attrCount + 1)
         // 该 chunk 的 size +20
-        putInt(merged, newElemOff + 4, el.size + 20)
+        Bytes.putI32(merged, newElemOff + 4, el.size + 20)
 
         return assemble(data, newPool, merged, delta)
     }
@@ -530,7 +532,7 @@ object AxmlEditor {
         System.arraycopy(head, 0, out, 0, 8)
         System.arraycopy(newPool, 0, out, 8, newPool.size)
         System.arraycopy(rest, 0, out, 8 + newPool.size, rest.size)
-        putInt(out, 4, out.size)   // 更新文件头里的总大小
+        Bytes.putI32(out, 4, out.size)   // 更新文件头里的总大小
         return out
     }
 
@@ -543,7 +545,7 @@ object AxmlEditor {
             if (type != RES_XML_RESOURCE_MAP_TYPE) continue
             val n = (size - headerSize) / 4
             for (i in 0 until n) {
-                m[i] = getInt(data, off + headerSize + i * 4)
+                m[i] = Bytes.i32(data, off + headerSize + i * 4)
             }
             break
         }
@@ -568,7 +570,7 @@ object AxmlEditor {
         val newId = resMap[newNameIdx] ?: return attrCount
         for (i in 0 until attrCount) {
             val p = attrBase + i * attrSize
-            val nm = getInt(rest, p + 4)
+            val nm = Bytes.i32(rest, p + 4)
             val curId = resMap[nm] ?: Int.MAX_VALUE
             if (newId < curId) return i
         }
@@ -583,18 +585,18 @@ object AxmlEditor {
     }
 
     private fun parsePool(data: ByteArray, off: Int): StringPool {
-        val size = getInt(data, off + 4)
-        val strCount = getInt(data, off + 8)
-        val styleCount = getInt(data, off + 12)
-        val flags = getInt(data, off + 16)
-        val stringsStart = getInt(data, off + 20)
-        val stylesStart = getInt(data, off + 24)
+        val size = Bytes.i32(data, off + 4)
+        val strCount = Bytes.i32(data, off + 8)
+        val styleCount = Bytes.i32(data, off + 12)
+        val flags = Bytes.i32(data, off + 16)
+        val stringsStart = Bytes.i32(data, off + 20)
+        val stylesStart = Bytes.i32(data, off + 24)
         val utf8 = (flags and 0x100) != 0
         val base = off + stringsStart
 
         val strings = ArrayList<String>(strCount)
         for (i in 0 until strCount) {
-            val strOff = base + getInt(data, off + 28 + i * 4)
+            val strOff = base + Bytes.i32(data, off + 28 + i * 4)
             strings.add(readString(data, strOff, utf8))
         }
         val styleData = if (styleCount > 0 && stylesStart > 0) {
@@ -618,10 +620,10 @@ object AxmlEditor {
             }
             return String(data, p, n, Charsets.UTF_8)
         }
-        var n = getShort(data, p)
+        var n = Bytes.u16(data, p)
         p += 2
         if (n and 0x8000 != 0) {
-            n = ((n and 0x7FFF) shl 16) or getShort(data, p)
+            n = ((n and 0x7FFF) shl 16) or Bytes.u16(data, p)
             p += 2
         }
         return String(data, p, n * 2, Charsets.UTF_16LE)
@@ -630,11 +632,11 @@ object AxmlEditor {
     private fun findApplication(data: ByteArray, pool: StringPool): Element? {
         for ((type, off, headerSize, size) in chunks(data)) {
             if (type != RES_XML_START_ELEMENT_TYPE) continue
-            val nameIdx = getInt(data, off + headerSize + 4)
+            val nameIdx = Bytes.i32(data, off + headerSize + 4)
             if (pool.strings.getOrNull(nameIdx) != "application") continue
-            val attrStart = getShort(data, off + headerSize + 8)
-            val attrSize = getShort(data, off + headerSize + 10)
-            val attrCount = getShort(data, off + headerSize + 12)
+            val attrStart = Bytes.u16(data, off + headerSize + 8)
+            val attrSize = Bytes.u16(data, off + headerSize + 10)
+            val attrCount = Bytes.u16(data, off + headerSize + 12)
             return Element(off, headerSize, size, attrStart, attrCount, attrSize)
         }
         return null
@@ -644,9 +646,9 @@ object AxmlEditor {
     private fun chunks(data: ByteArray): Sequence<Chunk> = sequence {
         var off = 8
         while (off + 8 <= data.size) {
-            val type = getShort(data, off)
-            val headerSize = getShort(data, off + 2)
-            val size = getInt(data, off + 4)
+            val type = Bytes.u16(data, off)
+            val headerSize = Bytes.u16(data, off + 2)
+            val size = Bytes.i32(data, off + 4)
             if (size < 8 || off + size > data.size) {
                 throw AxmlException("chunk 尺寸异常 @0x${off.toString(16)}: size=$size")
             }
@@ -658,26 +660,9 @@ object AxmlEditor {
     private data class Chunk(val type: Int, val off: Int, val headerSize: Int, val size: Int)
 
     // ── 字节工具（小端）──────────────────────────────────────
-    private fun getShort(b: ByteArray, o: Int): Int =
-        (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8)
 
-    private fun getInt(b: ByteArray, o: Int): Int =
-        (b[o].toInt() and 0xFF) or
-            ((b[o + 1].toInt() and 0xFF) shl 8) or
-            ((b[o + 2].toInt() and 0xFF) shl 16) or
-            ((b[o + 3].toInt() and 0xFF) shl 24)
 
-    private fun putShort(b: ByteArray, o: Int, v: Int) {
-        b[o] = (v and 0xFF).toByte()
-        b[o + 1] = ((v shr 8) and 0xFF).toByte()
-    }
 
-    private fun putInt(b: ByteArray, o: Int, v: Int) {
-        b[o] = (v and 0xFF).toByte()
-        b[o + 1] = ((v shr 8) and 0xFF).toByte()
-        b[o + 2] = ((v shr 16) and 0xFF).toByte()
-        b[o + 3] = ((v shr 24) and 0xFF).toByte()
-    }
 
     private fun concat(parts: List<ByteArray>): ByteArray {
         val total = parts.sumOf { it.size }

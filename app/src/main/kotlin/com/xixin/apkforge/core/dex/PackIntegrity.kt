@@ -1,5 +1,7 @@
 package com.xixin.apkforge.core.dex
 
+import com.xixin.apkforge.core.Bytes
+
 import com.android.tools.smali.dexlib2.Opcodes
 import com.android.tools.smali.dexlib2.dexbacked.DexBackedDexFile
 import com.xixin.apkforge.core.apk.ApkRepackager
@@ -125,15 +127,15 @@ object PackIntegrity {
             // 最典型的加固形态：整个 dex 被加密，头部不再是 dex\n
             return "魔数不是 dex\\n（前 4 字节为 ${hex(b, 0, 4)}），dex 已被整体加密"
         }
-        val declaredSize = le32u(b, 0x20)
+        val declaredSize = Bytes.u32(b, 0x20)
         if (declaredSize != b.size.toLong()) {
             return "头部声明 ${declaredSize} 字节，实际 ${b.size} 字节，数据被拼接或截断"
         }
-        val headerSize = le32u(b, 0x24)
+        val headerSize = Bytes.u32(b, 0x24)
         if (headerSize != HEADER_SIZE.toLong()) {
             return "header_size=${headerSize}，合法值应为 $HEADER_SIZE"
         }
-        val endian = le32(b, 0x28)
+        val endian = Bytes.i32(b, 0x28)
         // file_size/endian 两个字段：endian_tag 必须是 0x12345678（它本身就是小端写的），
         // 而 link_size/link_off 之后的 `endian_tag` 字段对大端序 dex 是 0x78563412。
         // 实测所有正常包（含本工程产物）这里都是 0x12345678，所以只校验前一个，
@@ -141,8 +143,8 @@ object PackIntegrity {
         if (endian != ENDIAN_TAG) {
             return "endian_tag 非法（${hex(b, 0x28, 4)}），合法值应为 78 56 34 12"
         }
-        val stringIds = le32u(b, 0x38)
-        val classDefs = le32u(b, 0x60)
+        val stringIds = Bytes.u32(b, 0x38)
+        val classDefs = Bytes.u32(b, 0x60)
         if (classDefs > 0L && stringIds == 0L) {
             return "声明了 $classDefs 个类却没有任何字符串，结构自相矛盾"
         }
@@ -191,11 +193,5 @@ object PackIntegrity {
             "%02x".format(b[it].toInt() and 0xFF)
         }
 
-    private fun le32(b: ByteArray, at: Int): Int =
-        (b[at].toInt() and 0xFF) or
-            ((b[at + 1].toInt() and 0xFF) shl 8) or
-            ((b[at + 2].toInt() and 0xFF) shl 16) or
-            ((b[at + 3].toInt() and 0xFF) shl 24)
 
-    private fun le32u(b: ByteArray, at: Int): Long = le32(b, at).toLong() and 0xFFFFFFFFL
 }
