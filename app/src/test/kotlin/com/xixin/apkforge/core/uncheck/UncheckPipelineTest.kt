@@ -6,6 +6,7 @@ import com.xixin.apkforge.core.axml.AxmlBoolean
 import com.xixin.apkforge.core.axml.AxmlEditor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -413,6 +414,93 @@ class UncheckPipelineTest {
             "指定 CORE(1) 应原样落进 sigfix.json，实际: $json",
             json.contains("\"hookLevel\":1"),
         )
+    }
+
+    /**
+     * 只做 Java 层：产物**不含** `.so`，也不改 `extractNativeLibs`。
+     *
+     * ## 防的是什么
+     *
+     * 上游 `--java-only` 的语义是「整层不投放」。如果 ApkForge 只关了一半
+     * （比如仍改 `extractNativeLibs`，或仍投放一个 `.so`），产物就是半吊子：
+     * 前者无意义地动了目标包 Manifest，后者 `.so` 在包里但没有 Java 侧调用它。
+     *
+     * 更糟的是「以为关了其实开着」：用户关掉开关是为了修「App 打不开」，
+     * 若开关没真正生效，他会以为这个方案无效。
+     */
+    @Test
+    fun `只做 Java 层时不投放 so 且不改 extractNativeLibs`() {
+        val apk = locateApk() ?: return
+        val work = workDir("java-only")
+        val out = File(work, "out.apk")
+
+        val result = UncheckPipeline.run(
+            apk, out, fakePayload(), workDir = work,
+            nativeLayer = false,
+        )
+
+        val layout = ZipCentralDirectory.read(out)
+        val names = layout.names
+
+        // 两个 .so 都不该在
+        assertTrue("只做 Java 层时不该有 arm64 .so", !names.contains(UncheckPayload.LIB_ARM64))
+        assertTrue("只做 Java 层时不该有 armv7 .so", !names.contains(UncheckPayload.LIB_ARM32))
+
+        // Java 层该有的一个不能少
+        assertTrue("缺新 dex", names.contains(result.newDex))
+        assertTrue("缺 payload.dex", names.contains(UncheckPayload.ASSET_PAYLOAD_DEX))
+        assertTrue("缺 sigfix.json", names.contains(UncheckPayload.ASSET_CONFIG))
+        assertTrue("缺 origin.apk", names.contains(UncheckPayload.ASSET_ORIGIN))
+
+        // Manifest 必须仍指向 SigFixApp（Java 层靠它挂载）
+        val mf = readEntry(out, UncheckPayload.MANIFEST)!!
+        assertEquals(UncheckPayload.SIGFIX_APP, AxmlEditor.getAppName(mf))
+
+        // 结果要如实报告
+        assertEquals("nativeLayer 应为 false", false, result.nativeLayer)
+        assertNull("没改过 extractNativeLibs，应为 null", result.extractNativeLibs)
+        assertTrue("不具备 native 能力", !result.nativeCapable)
+    }
+
+    /**
+     * 只做 Java 层时**不能**改 extractNativeLibs。
+     *
+     * 单独钉这一条是因为它是「多余的改动」：extractNativeLibs 只影响
+     * `.so` 是否被解压，没有 `.so` 时改它毫无意义，却白动了目标包的 Manifest。
+     * 判据：原包是 false 的，产物里仍应是 false。
+     */
+    @Test
+    fun `只做 Java 层时保留原 extractNativeLibs 值`() {
+        val apk = locateApk() ?: return
+        val srcMf = readEntry(apk, UncheckPayload.MANIFEST)!!
+        val srcValue = AxmlBoolean.getExtractNativeLibs(srcMf)
+
+        val work = workDir("java-only-libs")
+        val out = File(work, "out.apk")
+        UncheckPipeline.run(apk, out, fakePayload(), workDir = work, nativeLayer = false)
+
+        val outValue = AxmlBoolean.getExtractNativeLibs(
+            readEntry(out, UncheckPayload.MANIFEST)!!
+        )
+        assertEquals(
+            "只做 Java 层时不该动 extractNativeLibs（原包 $srcValue）",
+            srcValue,
+            outValue,
+        )
+    }
+
+    /** 默认必须投放 native 层（不能因为加了开关就默认关掉）。 */
+    @Test
+    fun `默认投放 native 层`() {
+        val apk = locateApk() ?: return
+        val work = workDir("default-native")
+        val out = File(work, "out.apk")
+        val result = UncheckPipeline.run(apk, out, fakePayload(), workDir = work)
+
+        assertEquals("默认 nativeLayer 应为 true", true, result.nativeLayer)
+        val names = ZipCentralDirectory.read(out).names
+        assertTrue("默认该有 arm64 .so", names.contains(UncheckPayload.LIB_ARM64))
+        assertTrue("默认该有 armv7 .so", names.contains(UncheckPayload.LIB_ARM32))
     }
 
     /** 新 dex 名必须避开已有名字。 */

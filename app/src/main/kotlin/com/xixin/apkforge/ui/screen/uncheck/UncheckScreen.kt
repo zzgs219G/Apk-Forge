@@ -1,5 +1,6 @@
 package com.xixin.apkforge.ui.screen.uncheck
 
+import androidx.compose.material3.Switch
 import com.xixin.apkforge.core.uncheck.UncheckPipeline
 import com.xixin.apkforge.ui.lifted.components.select.ToolSegmentedOptions
 import androidx.compose.foundation.background
@@ -168,13 +169,19 @@ fun UncheckScreen(
                     item { ErrorLine(msg, onDismiss = vm::clearError) }
                 }
 
-                // hook 档位：只在选了包、还没跑的时候出现。
+                // native 层开关 + 档位：只在选了包、还没跑的时候出现。
                 //
-                // 为什么要暴露这个开关：全量 native hook 会把目标 App 的**正常**
-                // 文件访问一起重定向，实测 JMComic 因此网络与图片全挂。用户遇到
-                // 「装上后 App 加载不出内容」时，如果没这个开关就只会认为工具坏了。
+                // 两个正交维度，必须分开讲：
+                //   · 要不要 native 层  → 打不开/加载不出内容时关掉
+                //   · native 挂多少个   → 只在开着时才有意义
                 if (ui.inputApk != null && !ui.running && ui.result == null) {
-                    item { HookLevelRow(ui, onSelect = vm::setHookLevel) }
+                    item {
+                        NativeLayerRow(
+                            state = ui,
+                            onToggle = vm::setNativeLayer,
+                            onSelectLevel = vm::setHookLevel,
+                        )
+                    }
                 }
 
                 // 日志：跑过才有内容，自带复制
@@ -394,23 +401,36 @@ private fun ErrorLine(message: String, onDismiss: () -> Unit) {
 }
 
 /**
- * native hook 档位选择。
+ * native 层开关 + hook 档位。
  *
- * ## 为什么这一行必须存在
+ * ## 为什么要让用户碰这个
  *
- * 全量 native hook（默认）会把目标 App 的**正常**文件访问一起重定向。
- * 上游 2026-11-27 实测：JMComic 加上 native 层后网络与图片加载全部失败，
- * 只做 Java 层则一切正常。根因是 18 个 libc 函数里有一些被 App 自己的
- * 代码路径依赖，重定向到 origin.apk 后它读不到期望的资源。
+ * 上游 2026-11-27 两次实测，都是「处理后 App 不正常」：
  *
- * 没有这个开关，用户遇到「装上后 App 加载不出内容」时只能认为工具坏了。
- * 有了它，一行说明 + 三档切换就能自救。
+ * ```
+ * JMComic（WebView 应用，签名校验只用 PackageManager，零 native 代码）
+ *   只做 Java 层      → 无盗版警告 + 网络正常
+ *   Java + native     → 网络与图片加载全部失败
+ * ```
  *
- * 只在「已选包、未运行、无结果」时展示：跑起来之后改档位没有意义
- * （用的是启动时的快照），跑完再改应该直接重跑。
+ * 根因是 libusign 无条件全局 hook 了 18 个 libc 接口，把 WebView 的
+ * Chromium IO 栈一起影响了。而这类 App 根本不需要 libc 重定向。
+ *
+ * 没有这两个开关，用户遇到「装上后 App 打不开 / 加载不出内容」只能认为工具坏了。
+ *
+ * ## 两个维度是正交的，不能合成一个
+ *
+ * · **要不要 native 层**：整层关掉，产物少两个 `.so`
+ * · **native 挂多少个函数**：只在开着时才有意义
+ *
+ * 所以先问「开不开」，开着才显示档位。档位藏在关掉的状态里没有意义。
  */
 @Composable
-private fun HookLevelRow(state: UncheckUiState, onSelect: (Int) -> Unit) {
+private fun NativeLayerRow(
+    state: UncheckUiState,
+    onToggle: (Boolean) -> Unit,
+    onSelectLevel: (Int) -> Unit,
+) {
     val levels = listOf(
         UncheckPipeline.HookLevel.CORE to "最小",
         UncheckPipeline.HookLevel.AT to "标准",
@@ -419,31 +439,59 @@ private fun HookLevelRow(state: UncheckUiState, onSelect: (Int) -> Unit) {
     val idx = levels.indexOfFirst { it.first == state.hookLevel }.coerceAtLeast(0)
 
     Column(Modifier.padding(top = 6.dp)) {
-        Text(
-            "native 拦截范围",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        Gap(6.dp)
-        ToolSegmentedOptions(
-            options = levels.map { it.second },
-            selectedIndex = idx,
-            onSelect = { onSelect(levels[it].first) },
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Gap(4.dp)
-        Text(
-            when (state.hookLevel) {
-                UncheckPipeline.HookLevel.CORE ->
-                    "只拦最关键的 7 个文件操作。装好 App 打不开时用这个。"
-                UncheckPipeline.HookLevel.AT ->
-                    "加上路径反查相关的拦截。"
-                else ->
-                    "覆盖最全。若处理后 App 网络或图片异常，降到「最小」重试。"
-            },
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "拦截 native 层",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                )
+                Text(
+                    if (state.nativeLayer) "覆盖 App 自己读 APK 的校验"
+                    else "只拦 PackageManager，不碰文件读取",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = state.nativeLayer, onCheckedChange = onToggle)
+        }
+
+        if (state.nativeLayer) {
+            Gap(6.dp)
+            Text(
+                "拦截范围",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Gap(6.dp)
+            ToolSegmentedOptions(
+                options = levels.map { it.second },
+                selectedIndex = idx,
+                onSelect = { onSelectLevel(levels[it].first) },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Gap(4.dp)
+            Text(
+                when (state.hookLevel) {
+                    UncheckPipeline.HookLevel.CORE ->
+                        "只拦最关键的 7 个文件操作。装好 App 打不开时用这个。"
+                    UncheckPipeline.HookLevel.AT ->
+                        "加上路径反查相关的拦截。"
+                    else ->
+                        "覆盖最全。若处理后 App 网络或图片异常，降到「最小」或直接关掉。"
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Gap(4.dp)
+            Text(
+                "关掉后：App 若在 native 里自己读 APK 校验签名，那条路拦不住。" +
+                    "但 WebView 类应用的网络与图片不会被打扰。",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

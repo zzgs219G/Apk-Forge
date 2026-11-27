@@ -89,11 +89,13 @@ object UncheckPipeline {
         val savedByReuse: Long,
         /** 原包是否带 v2/v3 签名块（决定 native 层能否读到证书） */
         val hadSignature: Boolean,
-        /** extractNativeLibs 的改写结果 */
-        val extractNativeLibs: AxmlBoolean.Outcome,
+        /** extractNativeLibs 的改写结果；`null` = 只做 Java 层，没改过这个属性 */
+        val extractNativeLibs: AxmlBoolean.Outcome?,
+        /** 本次是否投放了 native 层（`.so`）。false = 只做 Java 层 */
+        val nativeLayer: Boolean,
     ) {
-        /** 是否具备 native 层能力（需要签名块 + .so 都到位） */
-        val nativeCapable: Boolean get() = hadSignature
+        /** 是否具备 native 层能力：投放了 .so 且原包有签名块（否则读不到证书） */
+        val nativeCapable: Boolean get() = nativeLayer && hadSignature
     }
 
     /**
@@ -117,6 +119,27 @@ object UncheckPipeline {
          * 正常文件访问一起改写，JMComic 就是这样被搞坏网络和图片的。
          */
         hookLevel: Int = HookLevel.FULL,
+        /**
+         * 是否投放 native 层（`lib/{abi}/libusign.so`）。
+         *
+         * `false` = 只做 Java 层，产物少两个 `.so`、也跳过 `extractNativeLibs` 改写。
+         *
+         * ## 什么时候该关掉（上游 2026-11-27 实测）
+         *
+         * JMComic 是 Capacitor/WebView 应用，签名校验只用
+         * `PackageManager.getPackageInfo().signingInfo`，**零 native 代码** ——
+         * 它根本不需要 libc 重定向。而 libusign 无条件全局 hook 了 18 个 libc 接口，
+         * 把 WebView 的 Chromium IO 栈一起影响了，表现是图片加载不出来。
+         *
+         * ## 代价必须说清
+         *
+         * 关掉之后，目标 App 若在 native 里自己 `open(base.apk)` 解析签名块，
+         * 那条路绕不过。所以默认开着，只在「装了打不开 / 加载不出内容」时关。
+         *
+         * 与 [hookLevel] 是**正交**的两个维度：这个决定「要不要 native 层」，
+         * 那个决定「native 层挂多少个函数」。先关掉再谈档位。
+         */
+        nativeLayer: Boolean = true,
         progress: Progress = Progress { _, _ -> },
     ): Result {
         if (!input.isFile) throw PipelineException("输入不存在：${input.absolutePath}")
@@ -191,26 +214,36 @@ object UncheckPipeline {
                 )
             }
 
-            progress.on("改写 Manifest", "extractNativeLibs → true")
-            val (withLibs, libsOutcome) = try {
-                AxmlBoolean.setExtractNativeLibsTrue(newManifest)
-            } catch (e: Exception) {
-                throw PipelineException(
-                    "改写 extractNativeLibs 失败：${e.message}\n" +
-                        "  这一步决定 .so 能否被解压到 nativeLibraryDir，" +
-                        "缺失时 native 层加载必然失败。",
-                    e,
+            // extractNativeLibs 只在要投放 .so 时才需要改：
+            // 不改它 → .so 不被解压到 nativeLibraryDir → System.load 必然失败。
+            // 只做 Java 层时不动它（没必要改目标包的 Manifest）。
+            val libsOutcome: AxmlBoolean.Outcome? = if (nativeLayer) {
+                progress.on("改写 Manifest", "extractNativeLibs → true")
+                val (withLibs, outcome) = try {
+                    AxmlBoolean.setExtractNativeLibsTrue(newManifest)
+                } catch (e: Exception) {
+                    throw PipelineException(
+                        "改写 extractNativeLibs 失败：${e.message}\n" +
+                            "  这一步决定 .so 能否被解压到 nativeLibraryDir，" +
+                            "缺失时 native 层加载必然失败。\n" +
+                            "  若这个包确实不需要 native 层，可以关掉「投放 native 层」重试。",
+                        e,
+                    )
+                }
+                newManifest = withLibs
+                progress.on(
+                    "extractNativeLibs",
+                    when (outcome) {
+                        AxmlBoolean.Outcome.ALREADY_ON -> "原本就是 true"
+                        AxmlBoolean.Outcome.FLIPPED -> "false → true（原位）"
+                        AxmlBoolean.Outcome.ADDED -> "新增并设为 true"
+                    },
                 )
+                outcome
+            } else {
+                progress.on("改写 Manifest", "仅 Java 层：跳过 extractNativeLibs")
+                null
             }
-            newManifest = withLibs
-            progress.on(
-                "extractNativeLibs",
-                when (libsOutcome) {
-                    AxmlBoolean.Outcome.ALREADY_ON -> "原本就是 true"
-                    AxmlBoolean.Outcome.FLIPPED -> "false → true（原位）"
-                    AxmlBoolean.Outcome.ADDED -> "新增并设为 true"
-                },
-            )
 
             // ── ⑥ 中间包 ──────────────────────────────────────
             progress.on("组装中间包", "")
@@ -234,19 +267,22 @@ object UncheckPipeline {
                         ZipCentralDirectory.METHOD_DEFLATED,
                     )
                 )
-                // .so 必须 STORED：System.load 需要直接映射，压缩过的加载不了
-                add(
-                    ZipReuse.ExtraEntry(
-                        UncheckPayload.LIB_ARM64, payload.usignArm64,
-                        ZipCentralDirectory.METHOD_STORED,
+                // .so 必须 STORED：System.load 需要直接映射，压缩过的加载不了。
+                // 只做 Java 层时不投放 —— 见 nativeLayer 参数注释。
+                if (nativeLayer) {
+                    add(
+                        ZipReuse.ExtraEntry(
+                            UncheckPayload.LIB_ARM64, payload.usignArm64,
+                            ZipCentralDirectory.METHOD_STORED,
+                        )
                     )
-                )
-                add(
-                    ZipReuse.ExtraEntry(
-                        UncheckPayload.LIB_ARM32, payload.usignArm32,
-                        ZipCentralDirectory.METHOD_STORED,
+                    add(
+                        ZipReuse.ExtraEntry(
+                            UncheckPayload.LIB_ARM32, payload.usignArm32,
+                            ZipCentralDirectory.METHOD_STORED,
+                        )
                     )
-                )
+                }
             }
             buildIntermediate(input, intermediate, newManifest, extra, sourceLayout)
             progress.on("中间包", "${intermediate.length()} 字节，+${extra.size} 个条目")
@@ -280,7 +316,7 @@ object UncheckPipeline {
             // ── ⑨ 自检 ────────────────────────────────────────
             progress.on("自检", "")
             try {
-                selfCheck(output, newDex, config.size, hadSignature)
+                selfCheck(output, newDex, config.size, hadSignature, nativeLayer)
             } catch (e: Exception) {
                 // 半成品必须删掉：留个几百字节的 .apk 会让人以为成功了
                 output.delete()
@@ -301,6 +337,7 @@ object UncheckPipeline {
                 savedByReuse = stats.savedBytes,
                 hadSignature = hadSignature,
                 extractNativeLibs = libsOutcome,
+                nativeLayer = nativeLayer,
             )
         } finally {
             // 中间文件不留给用户：它们的体积可达原包两倍。
@@ -472,18 +509,26 @@ object UncheckPipeline {
     /**
      * 产物自检。**每一条都对应一次「装不上 / 装上没用」的真实失败**。
      */
-    private fun selfCheck(apk: File, newDex: String, configSize: Int, hadSignature: Boolean) {
+    private fun selfCheck(
+        apk: File,
+        newDex: String,
+        configSize: Int,
+        hadSignature: Boolean,
+        nativeLayer: Boolean,
+    ) {
         val layout = ZipCentralDirectory.read(apk)
 
-        // 1) 七个落点齐全
-        val required = listOf(
-            newDex,
-            UncheckPayload.ASSET_PAYLOAD_DEX,
-            UncheckPayload.ASSET_CONFIG,
-            UncheckPayload.ASSET_ORIGIN,
-            UncheckPayload.LIB_ARM64,
-            UncheckPayload.LIB_ARM32,
-        )
+        // 1) 落点齐全。只做 Java 层时不要求两个 .so
+        val required = buildList {
+            add(newDex)
+            add(UncheckPayload.ASSET_PAYLOAD_DEX)
+            add(UncheckPayload.ASSET_CONFIG)
+            add(UncheckPayload.ASSET_ORIGIN)
+            if (nativeLayer) {
+                add(UncheckPayload.LIB_ARM64)
+                add(UncheckPayload.LIB_ARM32)
+            }
+        }
         val missing = required.filter { layout.byName(it) == null }
         if (missing.isNotEmpty()) {
             throw IllegalStateException("产物缺条目：${missing.joinToString(", ")}")
@@ -499,8 +544,8 @@ object UncheckPipeline {
                     "载荷永远不会被执行"
             )
         }
-        // 3) extractNativeLibs 必须是 true（否则 .so 不解压）
-        if (AxmlBoolean.getExtractNativeLibs(mf) != true) {
+        // 3) 投放了 .so 就必须 extractNativeLibs=true（否则系统不解压，System.load 必然失败）
+        if (nativeLayer && AxmlBoolean.getExtractNativeLibs(mf) != true) {
             throw IllegalStateException(
                 "extractNativeLibs 不是 true —— .so 不会被解压到 nativeLibraryDir，" +
                     "System.load 必然失败，native 层完全无效"
@@ -522,10 +567,13 @@ object UncheckPipeline {
         }
 
         // 6) .so 必须是 STORED（压缩过的加载不了）
-        for (lib in listOf(UncheckPayload.LIB_ARM64, UncheckPayload.LIB_ARM32)) {
-            val e = layout.byName(lib)!!
-            if (!e.isStored) {
-                throw IllegalStateException("$lib 不是 STORED，System.load 会失败")
+        if (nativeLayer) {
+            for (lib in listOf(UncheckPayload.LIB_ARM64, UncheckPayload.LIB_ARM32)) {
+                val e = layout.byName(lib)
+                    ?: throw IllegalStateException("产物缺 $lib（投放了 native 层就必须有）")
+                if (!e.isStored) {
+                    throw IllegalStateException("$lib 不是 STORED，System.load 会失败")
+                }
             }
         }
 

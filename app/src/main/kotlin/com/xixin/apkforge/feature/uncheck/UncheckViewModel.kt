@@ -53,6 +53,18 @@ data class UncheckUiState(
      */
     val hookLevel: Int = UncheckPipeline.HookLevel.FULL,
 
+    /**
+     * 是否投放 native 层。默认 true。
+     *
+     * 关掉 = 只做 Java 层，产物少两个 .so。代价是目标 App 若在 native 里
+     * 自己 open(base.apk) 解析签名块，那条路绕不过。
+     *
+     * 什么时候关：处理后的 App 打不开 / 内容加载不出来时。实测 JMComic
+     * （WebView 应用，签名校验只用 PackageManager）被 libusign 的全局
+     * libc hook 影响了 Chromium 的 IO 栈，图片加载失败；关掉就正常。
+     */
+    val nativeLayer: Boolean = true,
+
     /** 最近一次结果 */
     val result: UncheckPipeline.Result? = null,
 
@@ -194,6 +206,7 @@ class UncheckViewModel(app: Application) : AndroidViewModel(app) {
                         output = out,
                         payload = payload,
                         hookLevel = ui.hookLevel,
+                        nativeLayer = ui.nativeLayer,
                         progress = UncheckPipeline.Progress { stage, detail ->
                             val isNew = seenStages.add(stage)
                             val frac = (seenStages.size.toFloat() / expectedStages)
@@ -243,6 +256,12 @@ class UncheckViewModel(app: Application) : AndroidViewModel(app) {
     fun setHookLevel(level: Int) {
         if (ui.running) return
         ui = ui.copy(hookLevel = level)
+    }
+
+    /** 切换是否投放 native 层。运行中不允许改（用的是启动时的快照）。 */
+    fun setNativeLayer(on: Boolean) {
+        if (ui.running) return
+        ui = ui.copy(nativeLayer = on)
     }
 
     fun clearError() {
