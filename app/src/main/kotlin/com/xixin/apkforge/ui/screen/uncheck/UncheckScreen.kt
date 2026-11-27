@@ -144,13 +144,6 @@ fun UncheckScreen(
         }
     }
 
-    fun installOutput() {
-        val f = requireOutput() ?: return
-        if (!OutputStore.installPath(context, f)) {
-            vm.showMessage("没有可用的安装器")
-        }
-    }
-
     fun shareOutput() {
         val f = requireOutput() ?: return
         if (!OutputStore.sharePath(context, f)) {
@@ -236,9 +229,7 @@ fun UncheckScreen(
                     item {
                         ResultCard(
                             r = r,
-                            hasSignature = r.hadSignature,
                             onLocate = ::locateOutput,
-                            onInstall = ::installOutput,
                             onShare = ::shareOutput,
                         )
                     }
@@ -333,65 +324,72 @@ fun UncheckScreen(
     @Composable
     private fun AppCard(state: UncheckUiState, onBack: () -> Unit) {
         if (state.inputApk == null) {
-            // 空态：本页没有文件选择器，直接说清楚该去哪
-            SectionCard(title = "尚未选择 APK", icon = Icons.Rounded.Security) {
-                Column(Modifier.padding(horizontal = 4.dp, vertical = 6.dp)) {
-                    Text(
-                        "去签名校验需要先有一个包。选包在控制台完成 —— 选完会问你做哪件事。",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Gap(10.dp)
-                    TextButton(
-                        onClick = onBack,
-                        contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
-                    ) {
-                        Text("去控制台选包", style = MaterialTheme.typography.labelLarge)
-                    }
-                }
-            }
+            EmptyHint(onBack)
             return
+        }
+
+        // 不套 SectionCard：这里只有「一个包」这一份信息，不是一组同级行。
+        // `SectionCard` 的约定是「一个功能区块 = 一张卡，卡内用行组织同级项」，
+        // 给单行信息套卡就是把卡片降级成「给一行字造的房间」。
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ApkIcon(state.meta?.icon, state.displayName, size = 44.dp)
+            HGap(12.dp)
+            Column(Modifier.weight(1f)) {
+                Text(
+                    state.displayName.ifBlank { "已选择 APK" },
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Gap(1.dp)
+                Text(
+                    listOfNotNull(
+                        state.meta?.packageName,
+                        state.meta?.versionName?.let { "v$it" },
+                        if (state.readingMeta) "读取中…" else HumanSize.format(state.inputSize),
+                    ).joinToString(" · "),
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
     }
 
-        SectionCard(
-            title = "目标 APK",
-            icon = Icons.Rounded.FolderOpen,
+    /** 空态：本页没有选择器，说清该去哪，并给一个入口。 */
+    @Composable
+    private fun EmptyHint(onBack: () -> Unit) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp, vertical = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Row(
-                Modifier.padding(horizontal = 4.dp, vertical = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                ApkIcon(
-                    icon = state.meta?.icon,
-                    fallback = state.displayName,
-                    size = 44.dp,
-                )
-                HGap(12.dp)
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        state.displayName.ifBlank { "已选择 APK" },
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Gap(2.dp)
-                    Text(
-                        listOfNotNull(
-                            state.meta?.packageName,
-                            state.meta?.versionName?.let { "v$it" },
-                            if (state.readingMeta) "读取中…" else HumanSize.format(state.inputSize),
-                        ).joinToString(" · "),
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontFamily = FontFamily.Monospace
-                        ),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
+            Text(
+                "还没有选包",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Gap(6.dp)
+            Text(
+                "选包在控制台完成 —— 选完会问你做哪件事",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Gap(16.dp)
+            TextButton(onClick = onBack) {
+                Text("去控制台选包", style = MaterialTheme.typography.labelLarge)
             }
-    }
+        }
     }
 
     // ══════════════════════ ② 处理方式 ══════════════════════
@@ -470,18 +468,17 @@ fun UncheckScreen(
                 Hint(
                     when (state.hookLevel) {
                         UncheckPipeline.HookLevel.CORE ->
-                            "只拦最关键的 7 个文件操作。装好后 App 打不开、加载不出内容时用这档。"
+                            "只拦 7 个主干操作。App 打不开时用这档。"
                         UncheckPipeline.HookLevel.AT ->
                             "加上路径反查相关的拦截。介于两者之间。"
                         else ->
-                            "覆盖最全。若处理后 App 网络或图片异常，降到「最小」，或直接关掉上面的开关。"
+                            "覆盖最全。App 网络或图片异常时降到「最小」。 "
                     }
                 )
             } else {
                 Gap(8.dp)
                 Hint(
-                    "关掉后 App 在 native 里自己读 APK 校验签名的路径拦不住。" +
-                        "但 WebView 类应用的网络与图片不会被打扰。"
+                    "关掉后拦不住 App 自己读 APK 的校验，但 WebView 类应用不会被打扰。"
                 )
             }
     }
@@ -518,29 +515,25 @@ fun UncheckScreen(
     /**
      * 结果卡。
      *
-     * ## 信息按「下一步要干什么」排序
+     * ## 设计原则：路径右侧就是操作
      *
-     * ```
-     * 产物在哪   ← 要签名、要装机，都从这里开始
-     * 一排操作   ← 复制路径 / MT 定位 / 安装 / 分享
-     * 它有什么特点 ← 体积、dex、证书指纹
-     * 怎么签     ← 关键约束，说清楚就不用回来问
-     * ```
+     * 上一版把四件事（复制/定位/安装/分享）做成两整行带文字的按钮，
+     * 每颗 `FilledTonalButton` 撑满半屏宽。而它们的语义只有图标那么大 ——
+     * 那是拿空间去解释自己，不是设计。
      *
-     * ## 为什么操作按钮必须在这里
+     * 现在：**路径一行 + 右侧图标**。路径本身就是「这个文件在哪」，
+     * 紧挨着它的图标就是「能拿它做什么」，这层关系不需要文字标签。
      *
-     * 上一版只有一行文字路径。用户拿到产物后真正要做的事是：
-     * 复制路径去别的地方、用 MT 打开、直接装、发给别人 —— 四件事一件都做不了，
-     * 得自己开文件管理器一层层点进去找。工具算完不给下手的地方，等于只做了一半。
+     * ## 为什么没有「安装」
      *
-     * 四颗图标各有明确用途，不做成弹菜单（多一次点击、还看不见有哪些动作）。
+     * 产物**未签名**，装不上。给一颗点了必然失败的按钮是骗用户。
+     * 真正该做的顺序是：先签名，再安装 —— 这一点用一行小字说，
+     * 比一颗假按钮诚实。
      */
     @Composable
     private fun ResultCard(
         r: UncheckPipeline.Result,
-        hasSignature: Boolean,
         onLocate: () -> Unit,
-        onInstall: () -> Unit,
         onShare: () -> Unit,
     ) {
         val copy = rememberCopyText()
@@ -550,112 +543,84 @@ fun UncheckScreen(
             subtitle = "${HumanSize.format(r.sourceSize)} → ${HumanSize.format(r.outputSize)}",
             icon = Icons.Rounded.CheckCircle,
         ) {
-            Column(Modifier.padding(horizontal = 4.dp, vertical = 6.dp)) {
-                // 产物路径：等宽、**不截断换行**。用户要把它复制出去，
-                // 截断等于把答案删了（AGENTS.md §1.8）。
+            // 路径 + 操作同一行：图标紧贴它作用的对象，这就是 UI 语言
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(start = 4.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(
                     r.output.absolutePath,
                     style = MaterialTheme.typography.labelSmall.copy(
                         fontFamily = FontFamily.Monospace
                     ),
                     color = MaterialTheme.colorScheme.onSurface,
+                    // 路径不截断：用户要拿它去找文件，截断等于删答案
+                    modifier = Modifier.weight(1f),
                 )
-
-                Gap(12.dp)
-
-                // 一排操作：四件事都是一步能做完的，不需要菜单
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    ActionChip(
-                        icon = Icons.Rounded.ContentCopy,
-                        label = "复制路径",
-                        onClick = { copy(r.output.absolutePath) },
-                        modifier = Modifier.weight(1f),
-                    )
-                    ActionChip(
-                        icon = Icons.Rounded.FolderOpen,
-                        label = "MT 定位",
-                        onClick = onLocate,
-                        modifier = Modifier.weight(1f),
-                    )
+                IconAction(Icons.Rounded.ContentCopy, "复制路径") {
+                    copy(r.output.absolutePath)
                 }
-                Gap(8.dp)
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    ActionChip(
-                        icon = Icons.Rounded.InstallMobile,
-                        label = "安装",
-                        onClick = onInstall,
-                        modifier = Modifier.weight(1f),
-                    )
-                    ActionChip(
-                        icon = Icons.Rounded.Share,
-                        label = "分享",
-                        onClick = onShare,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
+                IconAction(Icons.Rounded.FolderOpen, "在 MT 中定位", onLocate)
+                IconAction(Icons.Rounded.Share, "分享产物", onShare)
+            }
 
-                Gap(14.dp)
-                KeyValue("新 dex", r.newDex)
-                KeyValue("证书指纹", r.certSha256Short)
-                r.originalApp?.let { KeyValue("原 Application", it) }
-                if (r.savedByReuse > 0) {
-                    KeyValue("数据复用省下", HumanSize.format(r.savedByReuse))
-                }
+            Gap(8.dp)
+            // 元信息压成一行。不再四个 KeyValue 各占一行 ——
+            // 这些字段用户扫一眼就够，不需要逐行对齐的表格。
+            Text(
+                listOfNotNull(
+                    HumanSize.format(r.outputSize),
+                    r.newDex,
+                    r.certSha256Short.take(8),
+                    if (r.savedByReuse > 0) "省 ${HumanSize.format(r.savedByReuse)}" else null,
+                ).joinToString(" · "),
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
 
-                Gap(12.dp)
+            Gap(10.dp)
+            Hint(
+                "未签名 —— 用 MT 管理器签",
+                emphasis = true,
+            )
+
+            if (!r.nativeCapable) {
+                Gap(4.dp)
                 Hint(
-                    "未签名。签名请用 MT 管理器这类手写 ZIP 的工具 —— " +
-                        "apksigner 会重写 ZIP、把复用的体积优势抵消掉。",
+                    if (!r.nativeLayer) "仅 Java 层：App 自己读 APK 的校验拦不住"
+                    else "原包无 v2/v3 签名块，native 层读不到证书",
                     emphasis = true,
                 )
-
-                if (!r.nativeCapable) {
-                    Gap(6.dp)
-                    Hint(
-                        if (!r.nativeLayer) "本次只做了 Java 层：App 自己读 APK 的校验拦不住。"
-                        else "原包没有 v2/v3 签名块，native 层读不到证书 —— " +
-                            "App 自己读 APK 的校验可能拦不住。",
-                        emphasis = true,
-                    )
-                }
             }
-    }
+        }
     }
 
     /**
-     * 一颗带文字的动作按钮。
+     * 一颗纯图标操作。
      *
-     * 用 `FilledTonalButton` 而不是纯图标：这四件事用户第一次见不一定会用，
-     * 文字说明比猜图标快。两行两列排布，每颗都是拇指够得着的整块区域。
+     * 为什么不要文字标签：`复制路径` 四个字的信息量，远小于它占掉的
+     * 一整行高度。图标 + `contentDescription` 已完整表达语义 ——
+     * 前者给看得懂的人，后者给读屏与长按提示。
+     *
+     * 触控区 40dp（Material 最小可点区），视觉图标 18dp：
+     * 周围留白是为了好点，不是为了好看。
      */
     @Composable
-    private fun ActionChip(
+    private fun IconAction(
         icon: androidx.compose.ui.graphics.vector.ImageVector,
         label: String,
         onClick: () -> Unit,
-        modifier: Modifier = Modifier,
     ) {
-        androidx.compose.material3.FilledTonalButton(
-            onClick = onClick,
-            shape = MaterialTheme.shapes.medium,
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
-            modifier = modifier,
-        ) {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(16.dp))
-            HGap(6.dp)
-            Text(
-                label,
-                style = MaterialTheme.typography.labelMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+        IconButton(onClick = onClick, modifier = Modifier.size(40.dp)) {
+            Icon(
+                icon,
+                contentDescription = label,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
             )
-    }
+        }
     }
 
     @Composable
