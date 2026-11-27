@@ -41,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -139,8 +140,15 @@ fun LogPanel(
                     modifier = Modifier.weight(1f),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
+                    // 标题固定为「执行日志」，**不拼接 statusMsg**。
+                    //
+                    // 原先写的是 `执行日志 · ${statusMsg}`，而 statusMsg 里带着
+                    // 产物文件名（可以 60+ 字符）。标题行一旦被长串占满，
+                    // 右侧的行数与复制按钮就被挤到看不见 —— 用户最常用的
+                    // 恰恰是那颗复制键。
+                    // statusMsg 改为下方独立一行、单行省略，需要时点复制拿全文。
                     Text(
-                        if (logs.statusMsg.isNotEmpty()) "执行日志 · ${logs.statusMsg}" else "执行日志",
+                        "执行日志",
                         style = MaterialTheme.typography.titleSmall,
                         color = if (isError) MaterialTheme.colorScheme.onErrorContainer
                         else MaterialTheme.colorScheme.primary,
@@ -224,6 +232,22 @@ fun LogPanel(
                 }
             }
 
+            // statusMsg 独立一行：成功/失败 + 摘要。
+            //
+            // 放在标题下方而不是拼进标题：它的内容长度不可控（含产物文件名），
+            // 拼进标题会把右侧的行数/复制键挤掉。这里单行省略，全文可复制。
+            if (logs.statusMsg.isNotEmpty()) {
+                Text(
+                    logs.statusMsg,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (isError) MaterialTheme.colorScheme.onErrorContainer
+                    else MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
+                )
+            }
+
             HorizontalDivider(
                 color = if (isError) {
                     MaterialTheme.colorScheme.error.copy(alpha = 0.2f)
@@ -246,7 +270,15 @@ fun LogPanel(
                             style = MaterialTheme.typography.bodySmall.copy(
                                 fontFamily = if (logContent.isEmpty()) FontFamily.Default
                                 else FontFamily.Monospace,
-                                lineHeight = 18.sp,
+                                // ⚠️ 行高必须跟着字号走，不能写死。
+                                //
+                                // 原来写 `lineHeight = 18.sp`，而 bodySmall 是 12sp
+                                // → 行距 1.5 倍，中文等宽字体下换行后上下空隙明显，
+                                // 一屏只能塞十几行，看着「又大又散」。
+                                // 1.35 倍是代码类文本的常用值（IDE 默认区间 1.2~1.4），
+                                // 既有呼吸感又不浪费垂直空间。
+                                fontSize = 12.sp,
+                                lineHeight = 16.sp,
                                 letterSpacing = 0.sp,
                             ),
                             color = if (isError) MaterialTheme.colorScheme.onErrorContainer

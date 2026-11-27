@@ -72,6 +72,15 @@ data class UncheckUiState(
 
     /** 错误（人话，可直接展示） */
     val error: String? = null,
+
+    /**
+     * 一次性提示（如「产物文件不在了」）。
+     *
+     * 与 [error] 分开：error 表示**这次处理失败**，会占一块区域；
+     * message 是轻量的操作反馈（复制成功、找不到 MT），用完即消。
+     * 混在一起会让「点了个按钮没反应」和「整个任务挂了」长得一样。
+     */
+    val message: String? = null,
 ) {
     /** 卡片上显示的标题：应用名优先，退回文件名 */
     val displayName: String
@@ -264,6 +273,15 @@ class UncheckViewModel(app: Application) : AndroidViewModel(app) {
     fun setNativeLayer(on: Boolean) {
         if (ui.running) return
         ui = ui.copy(nativeLayer = on)
+    }
+
+    /** 轻量提示，用完即消。 */
+    fun showMessage(m: String) {
+        ui = ui.copy(message = m)
+    }
+
+    fun consumeMessage() {
+        ui = ui.copy(message = null)
     }
 
     fun clearError() {
