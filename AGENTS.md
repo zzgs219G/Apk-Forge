@@ -340,6 +340,20 @@ gh run download <id> -D dist
 
 `app/src/test/` 的所有断言都基于真实 APK（默认取本工程自己的 `app-debug.apk`）。不许用伪造的 smali 文本或手工构造的 dex 片段代替——真实包的形态（多 dex、Compose 大方法、R8 折叠字段）是伪造样本覆盖不到的。
 
+> **2026-11-27 更正**：本文原先在别处写过「不启用 R8，因为注入测试需要真实的类名与代码形态」。
+> 那句话是错的，已删除。**R8 混淆后的包才是线上 App 的真实形态** ——
+> 类名被改成 `l.lۢܺ`、字段被折叠、方法被内联，这些恰恰是注入/去校验
+> 真正要面对的形态。用未混淆的 debug 包当靶子才是理想化样本。
+>
+> release 已按 `jian_box` 的做法开启 R8 + 自定义混淆字典（见 `app/build.gradle.kts`
+> 的 `release` 块与 `app/proguard-rules.pro`）。实测产物 14.4MB → 2.1MB。
+>
+> ⚠️ **但本地 Termux 打不出可用的 release 包**：`optimizeReleaseResources`
+> 只写 metadata、不产出 `.ap_`，结果是包里**没有 `AndroidManifest.xml`
+> 和 `resources.arsc`**（见 §8 已知待办）。拿它当测试靶子会得到一串
+> 「APK 里没有 AndroidManifest.xml」的失败 —— 那不是 R8 的问题，
+> 是本地环境缺陷。CI 上正常。
+
 ### 3.2 断言只钉契约，不钉实现细节
 
 反面例子（坑 13）：

@@ -53,6 +53,75 @@ android {
             }
         }
         release {
+            // ── R8 混淆（抄自 jian_box，2026-11-27） ──
+            //
+            // ## 为什么必须开
+            //
+            // 线上 App **全都是混淆过的**。用未混淆的 debug 包当测试靶子，
+            // 等于拿理想化样本测一个只会在真实包上出问题的功能：
+            // 类名长什么样、方法数是 16722 还是 8000、字段有没有被折叠 ——
+            // 这些形态差异才是注入/去校验真正要面对的。
+            //
+            // 本工程的核心是「读写别人 APK 里的 dex」，而 R8 产物正是
+            // 最典型的真实形态（类名 b0/c94、字段被折叠、方法被内联）。
+            //
+            // ## proguardFiles 只能调用一次
+            //
+            // 多次调用会**覆盖**而非追加，把 proguard-rules.pro 挤掉 →
+            // keep 规则全失效 → 包运行即崩（jian_box 踩过）。
+            run {
+                val dictSrc = layout.projectDirectory.file("proguard-dictionary.txt").asFile
+                val extra = mutableListOf<Any>()
+                if (dictSrc.exists()) {
+                    val workDir = layout.buildDirectory.get().asFile
+                    val dictCopy = File(workDir, "obf-dictionary.txt")
+                    val ruleFile = File(workDir, "obf-dictionary.pro")
+                    workDir.mkdirs()
+                    dictSrc.copyTo(dictCopy, overwrite = true)
+                    val dictLines = dictCopy.readLines().count { it.isNotBlank() }
+                    // 不要用 java.security.MessageDigest：Gradle DSL 的 java{} 扩展
+                    // 会遮蔽 java 前缀。
+                    val dictPath = dictCopy.absolutePath.replace('\\', '/')
+                    ruleFile.writeText(
+                        "# 由 app/build.gradle.kts 生成，勿手工编辑\n" +
+                            "# 词典: ${dictCopy.absolutePath}  $dictLines 条\n" +
+                            // 两条指令缺一不可：前者只改类名，后者只改方法/字段名。
+                            // 只写 -obfuscationdictionary 时类名仍是 R8 默认的 b0/c94，
+                            // 极易误判成"字典没生效"（jian_box 踩过）。
+                            "-repackageclasses 'l'\n" +
+                            "-classobfuscationdictionary $dictPath\n" +
+                            "-obfuscationdictionary $dictPath\n"
+                    )
+                    extra += ruleFile
+                    logger.lifecycle("R8 混淆字典 → ${dictCopy.absolutePath}（$dictLines 条）")
+                } else {
+                    logger.warn("⚠️ 未找到 ${dictSrc.absolutePath}，R8 退回默认命名（不阻断构建）")
+                }
+                val allRules: List<Any> = buildList {
+                    add(getDefaultProguardFile("proguard-android-optimize.txt"))
+                    // ⚠️ 必须传**文件对象**，不能传字符串 "proguard-rules.pro"。
+                    //
+                    // 传字符串时 AGP 会当成「相对于模块目录的文件名」去解析，
+                    // 在 configuration cache 命中/复用的路径下这一步可能被跳过，
+                    // 结果是这份规则**静默失效** —— 实测表现：dexlib2 的
+                    // `-keep class com.android.tools.smali.dexlib2.**` 没生效，
+                    // 553 个类被重命名，而构建全程无任何警告。
+                    add(layout.projectDirectory.file("proguard-rules.pro").asFile)
+                    addAll(extra)
+                }
+                // proguardFiles 的形参是 Java 的 Object...，Kotlin 侧对应
+                // vararg Object，需展开为 Array<out Any>（Array<Any> 因泛型不协变不能直接展开）。
+                proguardFiles(*allRules.toTypedArray<Any>())
+            }
+            isMinifyEnabled = true
+            isShrinkResources = true
+
+            // mapping.txt 用于还原线上崩溃栈，也可用来验证混淆字典是否真的生效。
+            // ⚠️ 不要在这里写 mappingFileUploadEnabled —— 它属于 android{} 顶层，
+            //    写在 buildTypes.release{} 里会 Unresolved reference。
+            //    AGP 只要 isMinifyEnabled = true 就会生成
+            //    app/build/outputs/mapping/release/mapping.txt。
+
             // release 如需覆盖 32 位设备，改成：
             //   abiFilters += listOf("armeabi-v7a", "arm64-v8a")
             ndk {
@@ -66,7 +135,13 @@ android {
     }
 
     // 压缩 dex 与 .so：6700 万字节的 dex 压缩后约 1800 万（AGP 默认 STORED）。
-    // 代价是冷启动要解压；不启用 R8，因为注入测试需要真实的类名与代码形态。
+    // 代价是冷启动要解压。
+    //
+    // （2026-11-27 更正）原先这里写着「不启用 R8，因为注入测试需要真实的类名
+    //  与代码形态」，那句话是错的：R8 混淆后的包**才是**线上 App 的真实形态。
+    //  恰恰相反，用未混淆的 debug 包当靶子才是理想化样本 —— 它没有
+    //  「类名被改成 b0/c94」「字段被折叠」「方法被内联」这些真实特征。
+    //  release 已按 jian_box 的做法开启 R8 + 自定义混淆字典。
     packaging {
         dex {
             useLegacyPackaging = true
